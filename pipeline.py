@@ -41,12 +41,15 @@ def _ensure_required_tags(front: FrontClient) -> None:
 
 def _fetch_all_sources(front: FrontClient, since_ms: int) -> list[dict]:
     sources: list[tuple[str, list[dict]]] = []
+    max_pages = int(os.environ.get("SOURCE_MAX_PAGES", "5"))
 
     for inbox_id in [i.strip() for i in os.environ.get("INBOX_IDS", "").split(",") if i.strip()]:
-        sources.append((f"inbox:{inbox_id}", front.list_inbox_conversations(inbox_id, status="open", since_ms=since_ms)))
+        sources.append((f"inbox:{inbox_id}", front.list_inbox_conversations(
+            inbox_id, status="open", since_ms=since_ms, max_pages=max_pages)))
 
     for tm_id in [t.strip() for t in os.environ.get("TEAMMATE_IDS", "").split(",") if t.strip()]:
-        sources.append((f"assigned:{tm_id}", front.list_assigned_conversations(tm_id, since_ms=since_ms)))
+        sources.append((f"assigned:{tm_id}", front.list_assigned_conversations(
+            tm_id, since_ms=since_ms, max_pages=max_pages)))
 
     all_convs: list[dict] = []
     for name, convs in sources:
