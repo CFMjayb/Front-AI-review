@@ -111,7 +111,7 @@ def format_digest_section(corrections: list[dict]) -> str:
     lines = [
         "## Category Corrections This Week",
         "",
-        "To improve accuracy, ask Claude Code: \"add this week's corrections as examples\".",
+        "_These corrections have been automatically applied to improve future categorization accuracy._",
         "",
     ]
     for c in corrections:

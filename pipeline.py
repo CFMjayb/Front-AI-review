@@ -49,7 +49,7 @@ def _fetch_all_sources(front: FrontClient, since_ms: int) -> list[dict]:
 
     for tm_id in [t.strip() for t in os.environ.get("TEAMMATE_IDS", "").split(",") if t.strip()]:
         sources.append((f"assigned:{tm_id}", front.list_assigned_conversations(
-            tm_id, since_ms=since_ms, max_pages=max_pages)))
+            tm_id, status="open", since_ms=since_ms, max_pages=max_pages)))
 
     all_convs: list[dict] = []
     for name, convs in sources:
@@ -65,6 +65,20 @@ def _dedupe_by_id(conversations: list[dict]) -> list[dict]:
         if cid and cid not in seen:
             seen[cid] = c
     return list(seen.values())
+
+
+def _filter_open(conversations: list[dict]) -> tuple[list[dict], int]:
+    """Drop conversations that are not open (archived, deleted, spam, etc.)."""
+    active: list[dict] = []
+    skipped = 0
+    for c in conversations:
+        if (c.get("status") or "open") == "open":
+            active.append(c)
+        else:
+            skipped += 1
+    if skipped:
+        logger.info(f"Status filter: dropped {skipped} non-open conversation(s)")
+    return active, skipped
 
 
 def _filter_by_date(conversations: list[dict], since_ms: int) -> tuple[list[dict], int]:
@@ -169,6 +183,7 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
         conversations = _fetch_all_sources(front, since_ms)
 
     unique = _dedupe_by_id(conversations)
+    unique, _ = _filter_open(unique)
     unique, _ = _filter_by_date(unique, since_ms)
     todo, skipped = _filter_unprocessed(unique)
 

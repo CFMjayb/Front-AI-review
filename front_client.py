@@ -149,10 +149,13 @@ class FrontClient:
                               limit=limit, max_pages=max_pages, params=params)
 
     def list_assigned_conversations(self, teammate_id: str, *, since_ms: Optional[int] = None,
+                                     status: Optional[str] = None,
                                      limit: int = 50, max_pages: int = 5) -> list[dict]:
         params: dict[str, Any] = {}
         if since_ms:
             params["q[after]"] = since_ms // 1000
+        if status:
+            params["q[statuses][]"] = status
         return _collect_pages(f"/teammates/{teammate_id}/conversations", self.token,
                               limit=limit, max_pages=max_pages, params=params)
 

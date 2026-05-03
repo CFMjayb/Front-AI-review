@@ -95,6 +95,28 @@ def run_digest() -> dict:
     source_convs = _fetch_sources(front, since_ms)
     stats = _aggregate_stats(source_convs)
 
+    # Detect category corrections in already-processed conversations
+    corrections: list[dict] = []
+    try:
+        from modules import corrections as corr_mod
+        all_convs = [c for convs in source_convs.values() for c in convs]
+        processed_convs = [
+            c for c in all_convs
+            if any(t.get("name") == "AI/processed" for t in (c.get("tags") or []))
+        ]
+        # Dedupe by id
+        seen: set = set()
+        unique_processed = []
+        for c in processed_convs:
+            if c.get("id") not in seen:
+                seen.add(c["id"])
+                unique_processed.append(c)
+        corrections = corr_mod.detect_corrections(unique_processed, front)
+        if corrections:
+            logger.info(f"Digest: {len(corrections)} correction(s) found this week")
+    except Exception as exc:
+        logger.warning(f"digest: corrections detection failed: {exc}")
+
     res = claude.call(
         system=SYSTEM,
         user=f"Stats for the past 7 days:\n\n{json.dumps(stats, indent=2)}",
@@ -108,12 +130,18 @@ def run_digest() -> dict:
     DIGEST_DIR.mkdir(parents=True, exist_ok=True)
     filepath = DIGEST_DIR / f"{date_str}.md"
 
-    full_doc = "\n".join([
+    corrections_section = corr_mod.format_digest_section(corrections) if corrections else ""
+
+    sections = [
         f"# EDOM Weekly Digest — {date_str}",
         "",
         f"_Generated {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(started))} — cost ${res['cost_usd']:.4f}_",
         "",
         res["text"],
+    ]
+    if corrections_section:
+        sections += ["", "---", "", corrections_section]
+    sections += [
         "",
         "---",
         "",
@@ -122,7 +150,8 @@ def run_digest() -> dict:
         "```json",
         json.dumps(stats, indent=2),
         "```",
-    ])
+    ]
+    full_doc = "\n".join(sections)
 
     filepath.write_text(full_doc, encoding="utf-8")
     logger.info(f"Digest written to {filepath} — cost ${res['cost_usd']:.4f}")
