@@ -64,11 +64,13 @@ def _dedupe_by_id(conversations: list[dict]) -> list[dict]:
     return list(seen.values())
 
 
-def _filter_unprocessed(front: FrontClient, conversations: list[dict]) -> tuple[list[dict], int]:
+def _filter_unprocessed(conversations: list[dict]) -> tuple[list[dict], int]:
+    """Use tags already embedded in list response — no extra API calls."""
     todo: list[dict] = []
     skipped = 0
     for c in conversations:
-        if front.is_processed(c["id"]):
+        tag_names = {t.get("name") for t in (c.get("tags") or [])}
+        if PROCESSED_TAG in tag_names:
             skipped += 1
         else:
             todo.append(c)
@@ -143,7 +145,7 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
         conversations = _fetch_all_sources(front, since_ms)
 
     unique = _dedupe_by_id(conversations)
-    todo, skipped = _filter_unprocessed(front, unique)
+    todo, skipped = _filter_unprocessed(unique)
 
     results: list[dict] = []
     total_cost = 0.0
