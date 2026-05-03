@@ -37,9 +37,16 @@ def _pick_recipient(conv: dict, messages: list) -> list[str]:
     return []
 
 
-def _pick_channel_id(messages: list) -> Optional[str]:
+def _pick_channel_id(conv: dict, messages: list) -> Optional[str]:
+    # Try each message's _links.related.channel
     for m in (messages or []):
         url = ((m.get("_links") or {}).get("related") or {}).get("channel", "")
+        match = re.search(r"/channels/([^/?#]+)", url)
+        if match:
+            return match.group(1)
+    # Fall back to conversation-level channel link
+    for key in ("channel", "channels"):
+        url = ((conv.get("_links") or {}).get("related") or {}).get(key, "") or ""
         match = re.search(r"/channels/([^/?#]+)", url)
         if match:
             return match.group(1)
@@ -84,7 +91,9 @@ def run(ctx: dict, claude, front) -> dict:
             return {"ok": False, "output": data, "cost_usd": cost,
                     "writes": [], "error": "no recipient"}
 
-        channel_id = _pick_channel_id(messages)
+        channel_id = _pick_channel_id(ctx["conv"], messages)
+        if not channel_id:
+            channel_id = front.find_channel_for_conversation(cid)
         body_with_label = f"[AI/M8 draft]\n\n{data['body']}"
         try:
             front.create_draft(

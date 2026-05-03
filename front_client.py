@@ -254,6 +254,19 @@ class FrontClient:
                            self.token, body={"assignee_id": teammate_id})
         return data
 
+    def find_channel_for_conversation(self, conversation_id: str) -> Optional[str]:
+        """Fetch the full conversation object and extract its primary channel ID."""
+        try:
+            conv = self.get_conversation(conversation_id)
+            for key in ("channel", "channels"):
+                url = ((conv.get("_links") or {}).get("related") or {}).get(key, "") or ""
+                match = re.search(r"/channels/([^/?#]+)", url)
+                if match:
+                    return match.group(1)
+        except Exception as exc:
+            logger.debug(f"find_channel_for_conversation({conversation_id}) failed: {exc}")
+        return None
+
     def create_draft(self, conversation_id: Optional[str], *, channel_id: Optional[str] = None,
                      subject: str, body: str, to: list[str], mode: str = "private") -> dict:
         payload: dict[str, Any] = {"body": body, "subject": subject, "to": to, "mode": mode}
