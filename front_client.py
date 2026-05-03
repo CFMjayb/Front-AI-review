@@ -173,6 +173,18 @@ class FrontClient:
         return _collect_pages(f"/conversations/search/{encoded}", self.token,
                               limit=50, max_pages=max_pages)
 
+    def get_conversation_comments(self, conversation_id: str) -> list[dict]:
+        return _collect_pages(f"/conversations/{conversation_id}/comments", self.token,
+                              limit=50, max_pages=5)
+
+    def has_comment_with_prefix(self, conversation_id: str, prefix: str) -> bool:
+        """Return True if any existing comment body starts with prefix."""
+        try:
+            comments = self.get_conversation_comments(conversation_id)
+            return any((c.get("body") or "").startswith(prefix) for c in comments)
+        except Exception:
+            return False
+
     # ── Tags (process-cached) ────────────────────────────────────────────────
 
     _tag_cache: Optional[list[dict]] = None

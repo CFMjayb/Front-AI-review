@@ -2,3 +2,5 @@ anthropic>=0.39.0
 requests>=2.31.0
 python-dotenv>=1.0.0
 google-cloud-secret-manager>=2.20.0
+mcp>=1.0.0
+schedule>=1.2.0

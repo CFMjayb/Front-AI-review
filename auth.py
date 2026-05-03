@@ -6,9 +6,10 @@ import os
 import logging
 from typing import Optional
 
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv(Path(__file__).parent / ".env", override=True)
 
 logger = logging.getLogger(__name__)
 

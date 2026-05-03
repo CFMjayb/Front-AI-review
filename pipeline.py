@@ -1,10 +1,8 @@
 """EDOM pipeline orchestrator.
 
-Cost-control rule: every conversation gets exactly ONE AI review. After modules complete,
-the pipeline tags the conversation with edom-ai/processed. Subsequent runs check that tag
+Cost-control rule: every conversation gets exactly ONE AI review. After all modules complete,
+the pipeline tags the conversation with AI/processed. Subsequent runs check that tag
 FIRST and skip already-processed conversations before any Claude call.
-
-Minimal scope: M1 only. M2-M8, M4 cluster, scheduler, and digest will follow.
 """
 import logging
 import os
@@ -14,14 +12,15 @@ from typing import Optional
 from auth import get_anthropic_api_key, get_front_api_token
 from claude_client import ClaudeClient
 from front_client import FrontClient, PROCESSED_TAG
-from modules import m1_classify
+from modules import analyze, m4_cluster, m8_draft
 
 logger = logging.getLogger(__name__)
 
-# All tags the pipeline writes — auto-created on first run if missing
 REQUIRED_TAGS: list[tuple[str, Optional[str]]] = [
     (PROCESSED_TAG, "blue"),
-    *((f"AI/{c}", None) for c in m1_classify.CATEGORIES),
+    *((f"AI/{c}", None) for c in analyze.CATEGORIES),
+    *((f"urgency/{l}", None) for l in analyze.URGENCY_LEVELS),
+    *((f"sentiment/{v}", None) for v in analyze.SENTIMENT_VALUES),
 ]
 
 
@@ -93,13 +92,22 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
         transcript = front.messages_to_transcript(messages)
         ctx = {"conv": conv, "messages": messages, "transcript": transcript, "dry_run": dry_run}
 
-        m1 = m1_classify.run(ctx, claude, front)
-        module_results["m1"] = m1
-        cost += m1.get("cost_usd", 0)
+        # Single consolidated analysis (replaces M1-M7)
+        result = analyze.run(ctx, claude, front)
+        module_results["analyze"] = result
+        cost += result.get("cost_usd", 0)
 
-        # TODO M2-M8 + M4 cluster — added once minimal pipeline validates
+        # M8 draft — only when reply required and urgency is urgent or high
+        if result["ok"]:
+            out = result["output"] or {}
+            if out.get("requires_reply") and out.get("urgency") in ("urgent", "high"):
+                ctx["analyze"] = result
+                m8 = m8_draft.run(ctx, claude, front)
+                module_results["m8"] = m8
+                cost += m8.get("cost_usd", 0)
 
-        if not dry_run and m1["ok"]:
+        # Apply processed tag only after all writes succeed
+        if not dry_run and result["ok"]:
             front.add_tag(cid, PROCESSED_TAG)
         elif dry_run:
             logger.info(f"[dry-run] would apply {PROCESSED_TAG} to {cid}")
@@ -153,8 +161,20 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
         logger.info(f"{conv['id']} done ${r['cost_usd']:.4f} (cum ${total_cost:.4f})"
                     f"{' ERRORED' if r['errored'] else ''}")
 
+    # M4 cluster — runs over the full batch after individual conversations
+    m4_result = None
+    processed_results = [r for r in results if not r["errored"]]
+    if len(processed_results) >= 2:
+        logger.info(f"Running M4 cluster over {len(processed_results)} conversations")
+        try:
+            m4_result = m4_cluster.run(processed_results, claude, front, dry_run=dry_run)
+            total_cost += m4_result.get("cost_usd", 0)
+            logger.info(f"M4 complete: {len((m4_result.get('output') or {}).get('clusters', []))} clusters found")
+        except Exception as exc:
+            logger.error(f"M4 cluster failed: {exc}")
+
     logger.info(f"Pipeline complete: processed={sum(1 for r in results if not r['errored'])} "
                 f"errored={sum(1 for r in results if r['errored'])} skipped={skipped} "
                 f"cost=${total_cost:.4f}")
 
-    return {"results": results, "total_cost_usd": total_cost, "skipped": skipped}
+    return {"results": results, "m4": m4_result, "total_cost_usd": total_cost, "skipped": skipped}
