@@ -67,6 +67,20 @@ def _dedupe_by_id(conversations: list[dict]) -> list[dict]:
     return list(seen.values())
 
 
+def _filter_by_date(conversations: list[dict], since_ms: int) -> tuple[list[dict], int]:
+    """Drop conversations created before since_ms. Front API q[after] is unreliable."""
+    since_s = since_ms // 1000
+    in_window: list[dict] = []
+    before_cutoff = 0
+    for c in conversations:
+        if (c.get("created_at") or 0) >= since_s:
+            in_window.append(c)
+        else:
+            before_cutoff += 1
+    logger.info(f"Date filter: {len(in_window)} on/after cutoff, {before_cutoff} before cutoff dropped")
+    return in_window, before_cutoff
+
+
 def _filter_unprocessed(conversations: list[dict]) -> tuple[list[dict], int]:
     """Use tags already embedded in list response — no extra API calls."""
     todo: list[dict] = []
@@ -155,6 +169,7 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
         conversations = _fetch_all_sources(front, since_ms)
 
     unique = _dedupe_by_id(conversations)
+    unique, _ = _filter_by_date(unique, since_ms)
     todo, skipped = _filter_unprocessed(unique)
 
     results: list[dict] = []
