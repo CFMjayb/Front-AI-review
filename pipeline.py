@@ -202,6 +202,7 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
             from modules import corrections as corr_mod
             found = corr_mod.detect_corrections(skipped, front)
             corr_mod.log_corrections(found)
+            corr_mod.apply_corrections(found)
         except Exception as exc:
             logger.warning(f"Corrections scan failed: {exc}")
 

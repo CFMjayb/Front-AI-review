@@ -65,3 +65,45 @@ def get_mcp_api_key() -> str:
     if not key:
         raise RuntimeError("MCP_API_KEY not configured. Set env var or GCP secret 'mcp-api-key'.")
     return key
+
+
+# ── Examples store (analyze-examples secret) ─────────────────────────────────
+
+_EXAMPLES_SECRET = "analyze-examples"
+
+
+def read_examples() -> list[dict]:
+    """Read the accumulated correction examples from Secret Manager."""
+    import json
+    raw = _get_secret(_EXAMPLES_SECRET)
+    if not raw:
+        return []
+    try:
+        return json.loads(raw)
+    except Exception:
+        return []
+
+
+def write_examples(examples: list[dict]) -> None:
+    """Persist the full examples list as a new secret version."""
+    import json
+    if not (USE_SECRET_MANAGER and GCP_PROJECT):
+        return
+    try:
+        client = _sm_client()
+        parent = f"projects/{GCP_PROJECT}/secrets/{_EXAMPLES_SECRET}"
+        payload = {"data": json.dumps(examples, indent=2).encode("utf-8")}
+        try:
+            client.add_secret_version(request={"parent": parent, "payload": payload})
+        except Exception:
+            # Secret doesn't exist yet — create it
+            client.create_secret(request={
+                "parent": f"projects/{GCP_PROJECT}",
+                "secret_id": _EXAMPLES_SECRET,
+                "secret": {"replication": {"automatic": {}}},
+            })
+            client.add_secret_version(request={"parent": parent, "payload": payload})
+        _secret_cache.pop(_EXAMPLES_SECRET, None)
+        logger.info(f"Wrote {len(examples)} example(s) to {_EXAMPLES_SECRET} secret")
+    except Exception as exc:
+        logger.warning(f"write_examples failed: {exc}")

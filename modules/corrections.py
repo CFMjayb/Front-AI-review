@@ -89,6 +89,22 @@ def log_corrections(corrections: list[dict]) -> None:
         logger.info(f"Corrections this run: {len(corrections)}")
 
 
+def apply_corrections(corrections: list[dict]) -> None:
+    """Append new corrections to the analyze-examples secret for use in future runs."""
+    if not corrections:
+        return
+    try:
+        from auth import read_examples, write_examples
+        existing = read_examples()
+        seen_ids = {e.get("conversation_id") for e in existing}
+        new_ones = [c for c in corrections if c.get("conversation_id") not in seen_ids]
+        if new_ones:
+            write_examples(existing + new_ones)
+            logger.info(f"Added {len(new_ones)} correction(s) to analyze prompt examples")
+    except Exception as exc:
+        logger.warning(f"apply_corrections failed: {exc}")
+
+
 def format_digest_section(corrections: list[dict]) -> str:
     if not corrections:
         return ""

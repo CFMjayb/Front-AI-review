@@ -70,6 +70,28 @@ Respond with JSON only:
 }"""
 
 
+def _load_correction_examples() -> str:
+    """Append human-correction examples from Secret Manager to the system prompt."""
+    try:
+        from auth import read_examples
+        examples = read_examples()
+        if not examples:
+            return ""
+        lines = ["\n## Correction Examples (human feedback — use these to refine judgments)\n"]
+        for e in examples:
+            ctx_part = f'\n  Comment context: "{e["context"][:120]}"' if e.get("context") else ""
+            lines.append(
+                f'- AI said "{e["ai_category"]}", corrected to "{e["human_category"]}": '
+                f'subject "{e["subject"]}"{ctx_part}'
+            )
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+SYSTEM = SYSTEM + _load_correction_examples()
+
+
 def _get_model(claude) -> str:
     return os.environ.get("ANTHROPIC_MODEL_ANALYZE", "claude-sonnet-4-6")
 
