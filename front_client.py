@@ -255,14 +255,19 @@ class FrontClient:
         return data
 
     def find_channel_for_conversation(self, conversation_id: str) -> Optional[str]:
-        """Fetch the full conversation object and extract its primary channel ID."""
+        """Return the primary channel ID for a conversation (needed for draft creation)."""
         try:
+            # Prefer the direct channel link if present
             conv = self.get_conversation(conversation_id)
-            for key in ("channel", "channels"):
-                url = ((conv.get("_links") or {}).get("related") or {}).get(key, "") or ""
-                match = re.search(r"/channels/([^/?#]+)", url)
-                if match:
-                    return match.group(1)
+            channel_url = ((conv.get("_links") or {}).get("related") or {}).get("channel", "") or ""
+            match = re.search(r"/channels/([^/?#]+)", channel_url)
+            if match:
+                return match.group(1)
+            # Fall back to calling the conversation's channels list endpoint
+            data, _ = _request("GET", f"/conversations/{conversation_id}/channels", self.token)
+            items = _result_items(data)
+            if items:
+                return items[0].get("id")
         except Exception as exc:
             logger.debug(f"find_channel_for_conversation({conversation_id}) failed: {exc}")
         return None
