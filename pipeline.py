@@ -81,17 +81,17 @@ def _filter_by_date(conversations: list[dict], since_ms: int) -> tuple[list[dict
     return in_window, before_cutoff
 
 
-def _filter_unprocessed(conversations: list[dict]) -> tuple[list[dict], int]:
+def _filter_unprocessed(conversations: list[dict]) -> tuple[list[dict], list[dict]]:
     """Use tags already embedded in list response — no extra API calls."""
     todo: list[dict] = []
-    skipped = 0
+    skipped: list[dict] = []
     for c in conversations:
         tag_names = {t.get("name") for t in (c.get("tags") or [])}
         if PROCESSED_TAG in tag_names:
-            skipped += 1
+            skipped.append(c)
         else:
             todo.append(c)
-    logger.info(f"Gate: {len(conversations)} total / {skipped} already processed / {len(todo)} to do")
+    logger.info(f"Gate: {len(conversations)} total / {len(skipped)} already processed / {len(todo)} to do")
     return todo, skipped
 
 
@@ -196,8 +196,18 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
         except Exception as exc:
             logger.error(f"M4 cluster failed: {exc}")
 
+    # Corrections scan — detect category changes Jay made on already-processed convs
+    if skipped and not dry_run:
+        try:
+            from modules import corrections as corr_mod
+            found = corr_mod.detect_corrections(skipped, front)
+            corr_mod.log_corrections(found)
+        except Exception as exc:
+            logger.warning(f"Corrections scan failed: {exc}")
+
     logger.info(f"Pipeline complete: processed={sum(1 for r in results if not r['errored'])} "
-                f"errored={sum(1 for r in results if r['errored'])} skipped={skipped} "
+                f"errored={sum(1 for r in results if r['errored'])} skipped={len(skipped)} "
                 f"cost=${total_cost:.4f}")
 
-    return {"results": results, "m4": m4_result, "total_cost_usd": total_cost, "skipped": skipped}
+    return {"results": results, "m4": m4_result, "total_cost_usd": total_cost,
+            "skipped": len(skipped)}
