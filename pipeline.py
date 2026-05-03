@@ -1,0 +1,160 @@
+"""EDOM pipeline orchestrator.
+
+Cost-control rule: every conversation gets exactly ONE AI review. After modules complete,
+the pipeline tags the conversation with edom-ai/processed. Subsequent runs check that tag
+FIRST and skip already-processed conversations before any Claude call.
+
+Minimal scope: M1 only. M2-M8, M4 cluster, scheduler, and digest will follow.
+"""
+import logging
+import os
+import time
+from typing import Optional
+
+from auth import get_anthropic_api_key, get_front_api_token
+from claude_client import ClaudeClient
+from front_client import FrontClient, PROCESSED_TAG
+from modules import m1_classify
+
+logger = logging.getLogger(__name__)
+
+# All tags the pipeline writes — auto-created on first run if missing
+REQUIRED_TAGS: list[tuple[str, Optional[str]]] = [
+    (PROCESSED_TAG, "blue"),
+    *((f"AI/{c}", None) for c in m1_classify.CATEGORIES),
+]
+
+
+def _build_clients() -> tuple[FrontClient, ClaudeClient]:
+    front = FrontClient(get_front_api_token())
+    claude = ClaudeClient(
+        api_key=get_anthropic_api_key(),
+        default_model=os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7"),
+        fast_model=os.environ.get("ANTHROPIC_MODEL_FAST", "claude-haiku-4-5"),
+    )
+    return front, claude
+
+
+def _ensure_required_tags(front: FrontClient) -> None:
+    for name, highlight in REQUIRED_TAGS:
+        front.ensure_tag(name, highlight=highlight)
+
+
+def _fetch_all_sources(front: FrontClient, since_ms: int) -> list[dict]:
+    sources: list[tuple[str, list[dict]]] = []
+    if (inbox := os.environ.get("INBOX_BISHOP_ID")):
+        sources.append(("bishop", front.list_inbox_conversations(inbox, status="open", since_ms=since_ms)))
+    if (inbox := os.environ.get("INBOX_DIOCESE_ID")):
+        sources.append(("diocese", front.list_inbox_conversations(inbox, status="open", since_ms=since_ms)))
+    if (inbox := os.environ.get("INBOX_AT_EPISCOPALMARYLAND_ID")):
+        sources.append(("@episcopalmaryland", front.list_inbox_conversations(inbox, status="open", since_ms=since_ms)))
+    if (inbox := os.environ.get("PERSONAL_INBOX_ID")):
+        sources.append(("personal", front.list_inbox_conversations(inbox, status="open", since_ms=since_ms)))
+    if (tm := os.environ.get("JAY_TEAMMATE_ID")):
+        sources.append(("assigned-to-jay", front.list_assigned_conversations(tm, since_ms=since_ms)))
+
+    all_convs: list[dict] = []
+    for name, convs in sources:
+        logger.info(f"Source {name}: {len(convs)} conversations")
+        all_convs.extend(convs)
+    return all_convs
+
+
+def _dedupe_by_id(conversations: list[dict]) -> list[dict]:
+    seen: dict[str, dict] = {}
+    for c in conversations:
+        cid = c.get("id")
+        if cid and cid not in seen:
+            seen[cid] = c
+    return list(seen.values())
+
+
+def _filter_unprocessed(front: FrontClient, conversations: list[dict]) -> tuple[list[dict], int]:
+    todo: list[dict] = []
+    skipped = 0
+    for c in conversations:
+        if front.is_processed(c["id"]):
+            skipped += 1
+        else:
+            todo.append(c)
+    logger.info(f"Gate: {len(conversations)} total / {skipped} already processed / {len(todo)} to do")
+    return todo, skipped
+
+
+def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: bool) -> dict:
+    cid = conv["id"]
+    started = time.time()
+    cost = 0.0
+    errored = False
+    module_results: dict = {}
+
+    try:
+        messages = front.get_conversation_messages(cid)
+        transcript = front.messages_to_transcript(messages)
+        ctx = {"conv": conv, "messages": messages, "transcript": transcript, "dry_run": dry_run}
+
+        m1 = m1_classify.run(ctx, claude, front)
+        module_results["m1"] = m1
+        cost += m1.get("cost_usd", 0)
+
+        # TODO M2-M8 + M4 cluster — added once minimal pipeline validates
+
+        if not dry_run and m1["ok"]:
+            front.add_tag(cid, PROCESSED_TAG)
+        elif dry_run:
+            logger.info(f"[dry-run] would apply {PROCESSED_TAG} to {cid}")
+
+    except Exception as exc:
+        errored = True
+        logger.error(f"Conversation {cid} failed: {exc}")
+        module_results["error"] = str(exc)
+
+    return {
+        "conversation_id": cid,
+        "subject": conv.get("subject"),
+        "duration_s": time.time() - started,
+        "cost_usd": cost,
+        "errored": errored,
+        "modules": module_results,
+    }
+
+
+def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[bool] = None,
+                 since_ms: Optional[int] = None) -> dict:
+    if dry_run is None:
+        dry_run = os.environ.get("DRY_RUN", "false").lower() == "true"
+    lookback_days = int(os.environ.get("LOOKBACK_DAYS", "7"))
+    if since_ms is None:
+        since_ms = int(time.time() * 1000) - lookback_days * 24 * 3600 * 1000
+    max_cost = float(os.environ.get("MAX_RUN_COST_USD", "10"))
+
+    front, claude = _build_clients()
+    if not dry_run:
+        _ensure_required_tags(front)
+
+    if conversation_id:
+        conversations = [front.get_conversation(conversation_id)]
+        logger.info(f"single-conversation mode: {conversation_id}")
+    else:
+        conversations = _fetch_all_sources(front, since_ms)
+
+    unique = _dedupe_by_id(conversations)
+    todo, skipped = _filter_unprocessed(front, unique)
+
+    results: list[dict] = []
+    total_cost = 0.0
+    for conv in todo:
+        if total_cost >= max_cost:
+            logger.warning(f"Cost ceiling ${max_cost} hit at ${total_cost:.4f}, stopping")
+            break
+        r = _process_one(conv, front, claude, dry_run)
+        results.append(r)
+        total_cost += r["cost_usd"]
+        logger.info(f"{conv['id']} done ${r['cost_usd']:.4f} (cum ${total_cost:.4f})"
+                    f"{' ERRORED' if r['errored'] else ''}")
+
+    logger.info(f"Pipeline complete: processed={sum(1 for r in results if not r['errored'])} "
+                f"errored={sum(1 for r in results if r['errored'])} skipped={skipped} "
+                f"cost=${total_cost:.4f}")
+
+    return {"results": results, "total_cost_usd": total_cost, "skipped": skipped}
