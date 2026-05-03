@@ -132,9 +132,16 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
                  since_ms: Optional[int] = None) -> dict:
     if dry_run is None:
         dry_run = os.environ.get("DRY_RUN", "false").lower() == "true"
-    lookback_days = int(os.environ.get("LOOKBACK_DAYS", "7"))
     if since_ms is None:
-        since_ms = int(time.time() * 1000) - lookback_days * 24 * 3600 * 1000
+        earliest_date = os.environ.get("EARLIEST_DATE", "")
+        if earliest_date:
+            import datetime
+            since_ms = int(datetime.datetime.strptime(earliest_date, "%Y-%m-%d")
+                          .replace(tzinfo=datetime.timezone.utc).timestamp() * 1000)
+            logger.info(f"EARLIEST_DATE={earliest_date} → since_ms={since_ms}")
+        else:
+            lookback_days = int(os.environ.get("LOOKBACK_DAYS", "7"))
+            since_ms = int(time.time() * 1000) - lookback_days * 24 * 3600 * 1000
     max_cost = float(os.environ.get("MAX_RUN_COST_USD", "10"))
 
     front, claude = _build_clients()
