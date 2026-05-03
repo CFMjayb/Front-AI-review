@@ -48,8 +48,8 @@ jobs:
           docker push $IMAGE:${{ github.sha }}
           docker push $IMAGE:latest
 
-      # ── Deploy to Cloud Run ──────────────────────────────────────────────────
-      - name: Deploy to Cloud Run
+      # ── Deploy MCP server (Cloud Run Service) ────────────────────────────────
+      - name: Deploy MCP server
         run: |
           gcloud run deploy $SERVICE \
             --image            $IMAGE:${{ github.sha }} \
@@ -65,6 +65,20 @@ jobs:
             --min-instances    0 \
             --max-instances    3 \
             --port             8080
+
+      # ── Update pipeline job image ─────────────────────────────────────────────
+      - name: Update pipeline job
+        run: |
+          gcloud run jobs update edom-pipeline \
+            --image   $IMAGE:${{ github.sha }} \
+            --region  $REGION
+
+      # ── Update digest job image ───────────────────────────────────────────────
+      - name: Update digest job
+        run: |
+          gcloud run jobs update edom-digest \
+            --image   $IMAGE:${{ github.sha }} \
+            --region  $REGION
 
       # ── Smoke test ───────────────────────────────────────────────────────────
       - name: Smoke test
