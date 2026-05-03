@@ -41,16 +41,12 @@ def _ensure_required_tags(front: FrontClient) -> None:
 
 def _fetch_all_sources(front: FrontClient, since_ms: int) -> list[dict]:
     sources: list[tuple[str, list[dict]]] = []
-    if (inbox := os.environ.get("INBOX_BISHOP_ID")):
-        sources.append(("bishop", front.list_inbox_conversations(inbox, status="open", since_ms=since_ms)))
-    if (inbox := os.environ.get("INBOX_DIOCESE_ID")):
-        sources.append(("diocese", front.list_inbox_conversations(inbox, status="open", since_ms=since_ms)))
-    if (inbox := os.environ.get("INBOX_AT_EPISCOPALMARYLAND_ID")):
-        sources.append(("@episcopalmaryland", front.list_inbox_conversations(inbox, status="open", since_ms=since_ms)))
-    if (inbox := os.environ.get("PERSONAL_INBOX_ID")):
-        sources.append(("personal", front.list_inbox_conversations(inbox, status="open", since_ms=since_ms)))
-    if (tm := os.environ.get("JAY_TEAMMATE_ID")):
-        sources.append(("assigned-to-jay", front.list_assigned_conversations(tm, since_ms=since_ms)))
+
+    for inbox_id in [i.strip() for i in os.environ.get("INBOX_IDS", "").split(",") if i.strip()]:
+        sources.append((f"inbox:{inbox_id}", front.list_inbox_conversations(inbox_id, status="open", since_ms=since_ms)))
+
+    for tm_id in [t.strip() for t in os.environ.get("TEAMMATE_IDS", "").split(",") if t.strip()]:
+        sources.append((f"assigned:{tm_id}", front.list_assigned_conversations(tm_id, since_ms=since_ms)))
 
     all_convs: list[dict] = []
     for name, convs in sources:

@@ -58,3 +58,10 @@ def get_anthropic_api_key() -> str:
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY not configured. Set env var or GCP secret 'anthropic-api-key'.")
     return key
+
+
+def get_mcp_api_key() -> str:
+    key = _get_secret("mcp-api-key") or os.environ.get("MCP_API_KEY", "")
+    if not key:
+        raise RuntimeError("MCP_API_KEY not configured. Set env var or GCP secret 'mcp-api-key'.")
+    return key

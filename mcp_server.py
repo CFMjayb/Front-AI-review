@@ -1,30 +1,74 @@
 """EDOM Front MCP server — exposes Front API as tools callable from Claude Code.
 
-Run:  python mcp_server.py
-Register in ~/.claude/settings.json:
-  {
-    "mcpServers": {
-      "edom-front": {
-        "command": "python",
-        "args": ["C:\\dev\\edom-email-ops\\mcp_server.py"],
-        "env": {}
-      }
-    }
-  }
+HTTP mode (Cloud Run, default): python mcp_server.py
+Stdio mode (local dev):         TRANSPORT=stdio python mcp_server.py
 """
 import os
+import logging
+
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
 from auth import get_front_api_token
 from front_client import FrontClient
 
-mcp = FastMCP("edom-front")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# Injected by Cloud Run --set-secrets or set in .env for dev
+_MCP_API_KEY = os.environ.get("MCP_API_KEY", "")
+
+_OPEN_PATHS = {"/", "/health"}
+
+
+class ApiKeyMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path in _OPEN_PATHS or request.method == "OPTIONS":
+            return await call_next(request)
+
+        api_key = (
+            request.headers.get("X-API-Key", "")
+            or request.query_params.get("api_key", "")
+        )
+        if not api_key:
+            return JSONResponse({"error": "Missing X-API-Key header"}, status_code=401)
+        if not _MCP_API_KEY:
+            logger.error("MCP_API_KEY not configured")
+            return JSONResponse({"error": "Server misconfigured"}, status_code=500)
+        if api_key != _MCP_API_KEY:
+            logger.warning("Rejected invalid API key from %s",
+                           request.client.host if request.client else "unknown")
+            return JSONResponse({"error": "Unauthorized"}, status_code=403)
+        return await call_next(request)
+
+
+mcp = FastMCP(
+    "edom-front",
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
 
 
 def _front() -> FrontClient:
     return FrontClient(get_front_api_token())
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def root(request: Request):
+    return JSONResponse({"service": "edom-front", "status": "running"})
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request):
+    return JSONResponse({"status": "ok", "service": "edom-front"})
 
 
 # ── Read tools ────────────────────────────────────────────────────────────────
@@ -134,9 +178,27 @@ def front_set_assignee(conversation_id: str, teammate_id: str) -> dict:
 @mcp.tool()
 def front_create_draft(conversation_id: str, subject: str, body: str,
                        to: list[str]) -> dict:
-    """Create a draft reply attached to a conversation. Saved for human review — never auto-sent."""
+    """Create a draft reply. Saved for human review — never auto-sent."""
     return _front().create_draft(conversation_id, subject=subject, body=body, to=to)
 
 
+# ── App factory ───────────────────────────────────────────────────────────────
+
+def create_app():
+    starlette_app = mcp.streamable_http_app()
+    starlette_app.add_middleware(ApiKeyMiddleware)
+    return starlette_app
+
+
+app = create_app()
+
+
 if __name__ == "__main__":
-    mcp.run()
+    transport = os.environ.get("TRANSPORT", "http")
+    if transport == "stdio":
+        mcp.run()
+    else:
+        import uvicorn
+        port = int(os.environ.get("PORT", 8080))
+        logger.info("Starting edom-front MCP server on port %d", port)
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

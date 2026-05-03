@@ -1,0 +1,91 @@
+name: Build & Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:          # allow manual trigger from GitHub UI
+
+env:
+  REGION:   us-east1
+  SERVICE:  front-ai-review
+  IMAGE:    us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/front-mail/front-ai-review
+
+jobs:
+  deploy:
+    name: Build, push, deploy
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write         # required for Workload Identity Federation
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Authenticate to GCP via Workload Identity Federation ────────────────
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account:            ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      # ── Set up gcloud CLI ────────────────────────────────────────────────────
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      # ── Configure Docker to use gcloud credentials ───────────────────────────
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-east1-docker.pkg.dev --quiet
+
+      # ── Build & push image ───────────────────────────────────────────────────
+      - name: Build and push Docker image
+        run: |
+          docker build -t $IMAGE:${{ github.sha }} -t $IMAGE:latest .
+          docker push $IMAGE:${{ github.sha }}
+          docker push $IMAGE:latest
+
+      # ── Deploy to Cloud Run ──────────────────────────────────────────────────
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy $SERVICE \
+            --image            $IMAGE:${{ github.sha }} \
+            --region           $REGION \
+            --platform         managed \
+            --allow-unauthenticated \
+            --set-env-vars     GCP_PROJECT=${{ secrets.GCP_PROJECT_ID }},USE_SECRET_MANAGER=true \
+            --set-secrets      MCP_API_KEY=mcp-api-key:latest,FRONT_API_TOKEN=front-api-token:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest,INBOX_IDS=inbox-ids:latest,TEAMMATE_IDS=teammate-ids:latest \
+            --service-account  ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }} \
+            --memory           512Mi \
+            --cpu              1 \
+            --timeout          60 \
+            --min-instances    0 \
+            --max-instances    3 \
+            --port             8080
+
+      # ── Smoke test ───────────────────────────────────────────────────────────
+      - name: Smoke test
+        run: |
+          URL=$(gcloud run services describe $SERVICE \
+                  --region $REGION \
+                  --format 'value(status.url)')
+          echo "Service URL: $URL"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST \
+            -H "X-API-Key: invalid-test-key" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+            "$URL/mcp")
+          echo "Health check status: $STATUS"
+          if [ "$STATUS" = "403" ]; then
+            echo "✔ Deployment healthy (authentication working)."
+          elif [ "$STATUS" = "401" ]; then
+            echo "✔ Deployment healthy (missing API key)."
+          else
+            echo "Health check failed (expected 401/403, got $STATUS)"
+            exit 1
+          fi

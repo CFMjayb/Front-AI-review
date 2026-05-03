@@ -32,36 +32,21 @@ Output markdown only — no preamble, no JSON, no code fences."""
 
 def _fetch_sources(front: FrontClient, since_ms: int) -> dict[str, list[dict]]:
     sources = {}
-    if (inbox := os.environ.get("INBOX_BISHOP_ID")):
+
+    for inbox_id in [i.strip() for i in os.environ.get("INBOX_IDS", "").split(",") if i.strip()]:
         try:
-            sources["bishop"] = front.list_inbox_conversations(inbox, status="open", since_ms=since_ms)
+            sources[f"inbox:{inbox_id}"] = front.list_inbox_conversations(inbox_id, status="open", since_ms=since_ms)
         except Exception as exc:
-            logger.warning(f"digest: bishop fetch failed: {exc}")
-            sources["bishop"] = []
-    if (inbox := os.environ.get("INBOX_DIOCESE_ID")):
+            logger.warning(f"digest: inbox:{inbox_id} fetch failed: {exc}")
+            sources[f"inbox:{inbox_id}"] = []
+
+    for tm_id in [t.strip() for t in os.environ.get("TEAMMATE_IDS", "").split(",") if t.strip()]:
         try:
-            sources["diocese"] = front.list_inbox_conversations(inbox, status="open", since_ms=since_ms)
+            sources[f"assigned:{tm_id}"] = front.list_assigned_conversations(tm_id, since_ms=since_ms)
         except Exception as exc:
-            logger.warning(f"digest: diocese fetch failed: {exc}")
-            sources["diocese"] = []
-    if (inbox := os.environ.get("INBOX_AT_EPISCOPALMARYLAND_ID")):
-        try:
-            sources["@episcopalmaryland"] = front.list_inbox_conversations(inbox, status="open", since_ms=since_ms)
-        except Exception as exc:
-            logger.warning(f"digest: @episcopalmaryland fetch failed: {exc}")
-            sources["@episcopalmaryland"] = []
-    if (inbox := os.environ.get("PERSONAL_INBOX_ID")):
-        try:
-            sources["personal"] = front.list_inbox_conversations(inbox, status="open", since_ms=since_ms)
-        except Exception as exc:
-            logger.warning(f"digest: personal fetch failed: {exc}")
-            sources["personal"] = []
-    if (tm := os.environ.get("JAY_TEAMMATE_ID")):
-        try:
-            sources["assigned"] = front.list_assigned_conversations(tm, since_ms=since_ms)
-        except Exception as exc:
-            logger.warning(f"digest: assigned fetch failed: {exc}")
-            sources["assigned"] = []
+            logger.warning(f"digest: assigned:{tm_id} fetch failed: {exc}")
+            sources[f"assigned:{tm_id}"] = []
+
     return sources
 
 
