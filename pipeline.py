@@ -11,6 +11,7 @@ from typing import Optional
 
 from auth import get_anthropic_api_key, get_front_api_token
 from claude_client import ClaudeClient
+from cos import front_extract
 from front_client import FrontClient, PROCESSED_TAG
 from modules import analyze, m4_cluster, m8_draft
 
@@ -126,6 +127,16 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
         module_results["analyze"] = result
         cost += result.get("cost_usd", 0)
 
+        # CoS open-loop extraction — reuses the analysis above, no extra Claude cost
+        if result["ok"]:
+            try:
+                loop = front_extract.extract_from_analysis(
+                    conv, messages, result["output"], dry_run=dry_run)
+                if loop:
+                    module_results["loop"] = loop
+            except Exception as exc:
+                logger.warning(f"Loop extraction failed for {cid}: {exc}")
+
         # M8 draft — only when reply required and urgency is urgent or high
         if result["ok"]:
             out = result["output"] or {}
@@ -221,9 +232,16 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
         except Exception as exc:
             logger.warning(f"Corrections scan failed: {exc}")
 
+    # CoS loop reconcile — Claude-free pass that closes/refreshes existing loops
+    loop_reconcile = None
+    try:
+        loop_reconcile = front_extract.reconcile_open_front_loops(front, dry_run=dry_run)
+    except Exception as exc:
+        logger.warning(f"Loop reconcile failed: {exc}")
+
     logger.info(f"Pipeline complete: processed={sum(1 for r in results if not r['errored'])} "
                 f"errored={sum(1 for r in results if r['errored'])} skipped={len(skipped)} "
                 f"cost=${total_cost:.4f}")
 
     return {"results": results, "m4": m4_result, "total_cost_usd": total_cost,
-            "skipped": len(skipped)}
+            "skipped": len(skipped), "loop_reconcile": loop_reconcile}

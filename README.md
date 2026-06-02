@@ -55,6 +55,16 @@ pipeline. Design: [`docs/chief-of-staff/DESIGN.md`](docs/chief-of-staff/DESIGN.m
 - `cos_mcp_server.py` — exposes the ledger as `cos_*` tools (list/upsert/resolve/
   snooze loops, stats, people, memory). Same FastMCP + X-API-Key pattern as
   `mcp_server.py`. Run: `python cos_mcp_server.py` (HTTP) — defaults to port 8081.
-- Tests: `python -m pytest tests/test_ledger.py`
 
-Next: M2 vault render/reconcile, M3 Front loop extraction, M4 daily briefing.
+**M3 (done):** Front loop extraction, wired into the pipeline.
+
+- `cos/front_extract.py` — turns each conversation's existing analysis into a
+  loop (no extra Claude cost). Inbound thread needing reply/approval/payment/action
+  → `i_owe`; an outbound ask gone quiet ≥ `QUIET_THRESHOLD_HOURS` (default 36) →
+  `owed_to_me`; `spam` never becomes a loop.
+- `reconcile_open_front_loops()` — a Claude-free pass over loops already in the
+  ledger that auto-resolves them once you reply (or they do), bounded by the
+  number of open loops. Runs at the end of every pipeline run.
+- Tests: `python -m pytest tests/`
+
+Next: M2 vault render/reconcile, M4 daily briefing, M5 Outlook/Teams, M6 Zoom.
