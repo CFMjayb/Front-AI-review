@@ -338,9 +338,16 @@ class FrontClient:
         parts: list[str] = []
         total = 0
         for m in ordered:
+            # Front puts the sender in recipients[role='from']; `author` is null on
+            # inbound messages (the sender is a contact, not a teammate).
+            recips = m.get("recipients") or []
+            frm = next((r for r in recips if r.get("role") == "from"), None)
             author = m.get("author") or {}
-            sender = author.get("email") or author.get("handle") or "unknown"
-            recipients = ", ".join(r.get("handle", "") for r in (m.get("to") or []))
+            sender = ((frm or {}).get("handle") or author.get("email")
+                      or author.get("handle") or "unknown")
+            to_handles = [r.get("handle", "") for r in recips if r.get("role") == "to"]
+            recipients = ", ".join(to_handles or
+                                   [r.get("handle", "") for r in (m.get("to") or [])])
             ts = m.get("created_at")
             date = time.strftime("%Y-%m-%d %H:%M", time.gmtime(ts)) if ts else "unknown"
             body = FrontClient.extract_plain_text_body(m)

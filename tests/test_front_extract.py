@@ -95,6 +95,24 @@ def test_dry_run_does_not_write(mods):
     assert ledger.list_loops() == []
 
 
+def _real_inbound(email="hgraham@claggettcenter.org", name="Hannah Graham", ago_hours=1.0):
+    """A real-shape Front inbound message: author is null, sender is in
+    recipients[role='from']."""
+    return {"is_inbound": True, "created_at": time.time() - ago_hours * 3600,
+            "author": None,
+            "recipients": [{"role": "from", "handle": email, "name": name},
+                           {"role": "to", "handle": "jboggs@episcopalmaryland.org",
+                            "name": "Jay Boggs"}]}
+
+
+def test_inbound_counterparty_from_recipients_role(mods):
+    # Regression: author=null on inbound used to yield counterparty 'unknown'.
+    ledger, fx = mods
+    loop = fx.extract_from_analysis(_conv("cnv_real"), [_real_inbound()], _analysis())
+    assert loop["counterparty"] == "Hannah Graham"
+    assert loop["counterparty_email"] == "hgraham@claggettcenter.org"
+
+
 def test_cos_disabled_short_circuits(mods, monkeypatch):
     ledger, fx = mods
     monkeypatch.setenv("COS_ENABLED", "false")

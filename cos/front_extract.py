@@ -16,17 +16,42 @@ def front_source_link(conversation_id: str) -> str:
     return f"https://app.frontapp.com/open/{conversation_id}"
 
 
+def _from_and_to(m: dict) -> tuple[str, str, list[str]]:
+    """Pull the real sender + 'to' handles from a Front message.
+
+    Front puts the sender in recipients[role='from'] (and `author` is null on
+    INBOUND messages — the sender is a contact, not a teammate). Reading `author`
+    alone yields an empty sender for every inbound email, which is why loop
+    counterparties came out 'unknown'.
+    """
+    from_name = from_email = ""
+    tos: list[str] = []
+    for r in (m.get("recipients") or []):
+        role, handle, name = r.get("role"), r.get("handle") or "", r.get("name") or ""
+        if role == "from" and not from_email:
+            from_name, from_email = name, handle
+        elif role == "to":
+            tos.append(handle)
+    return from_name, from_email, tos
+
+
 def _normalize(messages: list[dict]) -> list[dict]:
     norm: list[dict] = []
     for m in messages or []:
         author = m.get("author") or {}
-        name = f"{author.get('first_name') or ''} {author.get('last_name') or ''}".strip()
+        author_name = f"{author.get('first_name') or ''} {author.get('last_name') or ''}".strip()
+        from_name, from_email, tos = _from_and_to(m)
+        sender_name = (from_name or author_name or from_email
+                       or author.get("email") or author.get("handle") or "")
+        sender_email = from_email or author.get("email") or ""
+        if not tos:  # fallback for any non-standard shape
+            tos = [r.get("handle", "") for r in (m.get("to") or [])]
         norm.append(extract.make_message(
             inbound=bool(m.get("is_inbound")),
             ts_epoch=m.get("created_at") or 0,
-            sender_name=name or author.get("email") or author.get("handle") or "",
-            sender_email=author.get("email") or "",
-            recipients=[r.get("handle", "") for r in (m.get("to") or [])],
+            sender_name=sender_name,
+            sender_email=sender_email,
+            recipients=tos,
             text=FrontClient.extract_plain_text_body(m),
         ))
     return norm
