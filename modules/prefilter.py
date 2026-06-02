@@ -1,47 +1,41 @@
-"""Cheap, AI-free pre-filter for obvious bulk / marketing / system mail.
+"""Cheap, AI-free pre-filter for unambiguous bulk / system mail.
 
-Runs BEFORE the Claude analysis so we don't pay to AI-review newsletters,
-no-reply blasts, and bounce messages. Conservative by design: it only fires on
-strong, unambiguous bulk signals —
+Runs BEFORE the Claude analysis so we don't pay to AI-review marketing blasts and
+bounce messages. **Precision over recall by design** — it only skips mail that is
+safe to skip regardless of content:
 
-  1. a known bulk-ESP sender domain (Mailchimp, Constant Contact, SendGrid, …),
-  2. a system / bounce sender (mailer-daemon, postmaster, …), or
-  3. a classic bulk-mail footer in the body (unsubscribe / manage preferences / …),
+  1. a dedicated *marketing-platform* sender domain (Mailchimp, Constant Contact,
+     Campaign Monitor, Marketo, Pardot, Klaviyo, …), or
+  2. a system / bounce sender (mailer-daemon, postmaster, …).
 
-and NEVER on a thread Jay has already replied to. Everything ambiguous still
-goes to the full AI review. A match is tagged AI/spam + AI/processed and skipped,
-saving the per-conversation Claude cost.
+It deliberately does NOT use body footers like "unsubscribe": validation against
+the AI's own labels showed those appear on legitimate transactional mail too
+(EDOM payroll-deposit receipts, grant alerts, service notifications), so keying on
+them wrongly skipped important email. General-purpose ESPs (SendGrid, Mailgun,
+SparkPost, Mailjet) are also excluded because orgs send transactional mail through
+them. Anything ambiguous still gets the full AI review (which then labels real
+spam at ~$0.02). Never fires on a thread Jay has already replied to.
 
-Disable with SPAM_PREFILTER=false.
+A match is tagged AI/spam + AI/processed and skipped. Disable with SPAM_PREFILTER=false.
 """
 import os
 import re
 
-# Classic bulk-mail footer phrases. A genuine 1:1 human email essentially never
-# contains these; marketing / newsletters almost always do.
-_BULK_BODY = re.compile(
-    r"unsubscribe"
-    r"|view (?:this|it)(?: email)? in your browser"
-    r"|manage (?:your )?(?:email )?preferences"
-    r"|update your (?:email )?preferences"
-    r"|you(?:'re| are) receiving this (?:email|message)"
-    r"|no longer wish to receive"
-    r"|opt[- ]?out"
-    r"|add us to your address book",
-    re.I,
-)
-
-# Known bulk email-service-provider sending domains.
-_ESP_DOMAINS = (
-    "mailchimp.com", "mcsv.net", "mcdlv.net", "rsgsv.net",
-    "sendgrid.net", "sendgrid.com", "sparkpostmail.com",
-    "constantcontact.com", "ccsend.com",
-    "createsend.com", "cmail19.com", "cmail20.com",
-    "hubspotemail.net", "hs-send.com",
-    "mailgun.org", "sendinblue.com", "sib.email", "list-manage.com",
-    "exct.net", "mailjet.com",
-    "marketo.com", "mktomail.com", "pardot.com",
-    "klaviyomail.com", "icontact.com", "benchmarkemail.com",
+# Dedicated MARKETING email-platform sending domains. These send marketing/
+# newsletter blasts (not transactional mail), so they're safe to skip without
+# reading content. General-purpose ESPs are intentionally NOT here.
+_MARKETING_ESP_DOMAINS = (
+    "mcsv.net", "mcdlv.net", "rsgsv.net", "list-manage.com",   # Mailchimp
+    "ccsend.com", "constantcontact.com",                         # Constant Contact
+    "createsend.com", "cmail19.com", "cmail20.com",             # Campaign Monitor
+    "mktomail.com",                                              # Marketo
+    "pardot.com",                                                # Pardot
+    "klaviyomail.com",                                           # Klaviyo
+    "icontact.com",                                              # iContact
+    "benchmarkemail.com",                                        # Benchmark
+    "sendinblue.com", "sib.email",                              # Brevo (marketing)
+    "hubspotemail.net", "hs-send.com",                          # HubSpot (marketing)
+    "exct.net",                                                  # Salesforce Marketing Cloud
 )
 
 # System / bounce senders — never need an AI review.
@@ -56,7 +50,7 @@ def _sender(msg: dict) -> str:
 
 
 def looks_like_bulk(conv: dict, messages: list[dict]) -> tuple[bool, str | None]:
-    """Return (is_bulk, reason). Conservative — only obvious bulk / system mail."""
+    """Return (is_bulk, reason). Only obvious marketing-platform / system mail."""
     if os.environ.get("SPAM_PREFILTER", "true").lower() != "true":
         return (False, None)
 
@@ -71,15 +65,10 @@ def looks_like_bulk(conv: dict, messages: list[dict]) -> tuple[bool, str | None]
     sender = _sender(latest)
     localpart, _, domain = sender.partition("@")
 
-    if domain and any(domain == d or domain.endswith("." + d) for d in _ESP_DOMAINS):
-        return (True, f"bulk ESP sender domain ({domain})")
+    if domain and any(domain == d or domain.endswith("." + d) for d in _MARKETING_ESP_DOMAINS):
+        return (True, f"marketing-platform sender domain ({domain})")
 
     if _SYSTEM_LOCALPART.match(localpart):
         return (True, f"system/bounce sender ({sender or 'unknown'})")
-
-    from front_client import FrontClient
-    body = " ".join(FrontClient.extract_plain_text_body(m) for m in inbound)
-    if _BULK_BODY.search(body):
-        return (True, "bulk/marketing footer (unsubscribe/preferences)")
 
     return (False, None)

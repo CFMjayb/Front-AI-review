@@ -1,4 +1,4 @@
-"""Tests for the AI-free bulk/spam pre-filter."""
+"""Tests for the AI-free bulk/spam pre-filter (precision-first)."""
 import time
 
 from modules.prefilter import looks_like_bulk
@@ -14,16 +14,10 @@ def _msg(inbound=True, email="someone@example.org", text="Hello Jay,\n\nLet's me
             "author": {"email": email}, "text": text, "to": [{"handle": "jay@cfmins.org"}]}
 
 
-def test_newsletter_with_unsubscribe_footer_is_bulk():
-    msgs = [_msg(text="Our spring appeal is live!\n\nUnsubscribe | View this email in your browser")]
+def test_marketing_esp_domain_is_bulk():
+    msgs = [_msg(email="bounce@mail.ccsend.com", text="Our spring appeal is live!")]
     is_bulk, reason = looks_like_bulk(_conv(), msgs)
-    assert is_bulk and "footer" in reason
-
-
-def test_known_esp_domain_is_bulk():
-    msgs = [_msg(email="campaign@mail.mailchimp.com", text="Plain promo, no footer word")]
-    is_bulk, reason = looks_like_bulk(_conv(), msgs)
-    assert is_bulk and "ESP" in reason
+    assert is_bulk and "marketing-platform" in reason
 
 
 def test_mailer_daemon_bounce_is_bulk():
@@ -39,11 +33,35 @@ def test_plain_human_email_is_not_bulk():
     assert not is_bulk and reason is None
 
 
+def test_unsubscribe_footer_alone_is_not_bulk():
+    # A footer word is NOT enough — too many legit emails carry one.
+    msgs = [_msg(email="info@msde.maryland.gov",
+                 text="Grant opportunity details...\n\nUnsubscribe | Manage preferences")]
+    is_bulk, reason = looks_like_bulk(_conv(), msgs)
+    assert not is_bulk and reason is None
+
+
+def test_transactional_noreply_with_unsubscribe_not_flagged():
+    # Regression guard: real EDOM payroll receipt — no-reply sender + unsubscribe
+    # footer — must NOT be skipped.
+    msgs = [_msg(email="no-reply@paychex.com",
+                 text="Payroll direct deposit receipt for Episcopal Diocese of "
+                      "Maryland.\n\nTo unsubscribe from these notifications click here.")]
+    is_bulk, reason = looks_like_bulk(_conv(), msgs)
+    assert not is_bulk and reason is None
+
+
+def test_general_purpose_esp_not_flagged():
+    # SendGrid etc. carry transactional mail too — must NOT be blanket-skipped.
+    msgs = [_msg(email="receipts@em123.sendgrid.net", text="Your receipt")]
+    is_bulk, reason = looks_like_bulk(_conv(), msgs)
+    assert not is_bulk and reason is None
+
+
 def test_engaged_thread_never_prefiltered():
-    # Even with an unsubscribe footer, if Jay already replied it's a real thread.
     msgs = [
-        _msg(inbound=True, text="...unsubscribe...", ago_hours=5),
-        _msg(inbound=False, email="jay@cfmins.org", text="Thanks, removing us.", ago_hours=2),
+        _msg(inbound=True, email="news@mcsv.net", text="appeal", ago_hours=5),
+        _msg(inbound=False, email="jay@cfmins.org", text="Thanks", ago_hours=2),
     ]
     is_bulk, reason = looks_like_bulk(_conv(), msgs)
     assert not is_bulk and reason is None
@@ -51,6 +69,6 @@ def test_engaged_thread_never_prefiltered():
 
 def test_disabled_via_env(monkeypatch):
     monkeypatch.setenv("SPAM_PREFILTER", "false")
-    msgs = [_msg(email="campaign@mailchimp.com", text="unsubscribe")]
+    msgs = [_msg(email="news@mcsv.net", text="appeal")]
     is_bulk, reason = looks_like_bulk(_conv(), msgs)
     assert not is_bulk and reason is None
