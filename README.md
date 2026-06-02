@@ -41,3 +41,20 @@ python cli.py pipeline
 - `pipeline.py` — orchestrator. Fetches 5 sources, gates on `edom-ai/processed`, runs modules, tags on success.
 - `modules/m1_classify.py` — first AI module (others to follow).
 - `cli.py` — command-line entry: `pipeline`, `single`, `help`.
+
+## Chief of Staff (in progress)
+
+A cross-channel open-loop tracker + daily briefing built on top of the email
+pipeline. Design: [`docs/chief-of-staff/DESIGN.md`](docs/chief-of-staff/DESIGN.md).
+
+**M1 (done):** the open-loop ledger and its MCP server.
+
+- `cos/ledger.py` — SQLite ledger (source of truth) for loops, people, memory.
+  Loops are idempotent on `channel + source_ref + direction`; a manually-set
+  status (done/dropped/snoozed) is never overwritten by a re-sweep.
+- `cos_mcp_server.py` — exposes the ledger as `cos_*` tools (list/upsert/resolve/
+  snooze loops, stats, people, memory). Same FastMCP + X-API-Key pattern as
+  `mcp_server.py`. Run: `python cos_mcp_server.py` (HTTP) — defaults to port 8081.
+- Tests: `python -m pytest tests/test_ledger.py`
+
+Next: M2 vault render/reconcile, M3 Front loop extraction, M4 daily briefing.
