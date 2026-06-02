@@ -58,7 +58,16 @@ def _request(method: str, path_or_url: str, token: str, body: Optional[dict] = N
         if exc.code == 401:
             raise FrontApiError(401, "Front rejected the token. Check FRONT_API_TOKEN.") from exc
         if exc.code == 403:
-            raise FrontApiError(403, "Token valid but missing required scope.") from exc
+            detail = body_text.strip()[:300]
+            # A 403 can come from Front (missing scope) OR from an egress proxy
+            # blocking the host (e.g. "Host not in allowlist"). Surface the body
+            # so the two are distinguishable instead of always blaming scope.
+            msg = "Front returned 403."
+            if "allowlist" in detail.lower() or "host" in detail.lower():
+                msg = "403 from network egress proxy, not Front — host likely not allowlisted."
+            elif detail:
+                msg = "Front returned 403 (token may be missing required scope)."
+            raise FrontApiError(403, f"{msg} Body: {detail!r}" if detail else msg) from exc
         if exc.code == 429:
             retry_after = int(exc.headers.get("Retry-After", "5"))
             time.sleep(retry_after)
