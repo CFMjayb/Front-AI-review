@@ -96,6 +96,24 @@ def _get_model(claude) -> str:
     return os.environ.get("ANTHROPIC_MODEL_ANALYZE", "claude-sonnet-4-6")
 
 
+def analyze_transcript(claude, *, subject: str, sender: str, transcript: str) -> dict:
+    """Write-free analysis of any thread transcript (used by non-Front channels).
+
+    Same SYSTEM prompt and JSON contract as run(), but performs no Front writes —
+    returns {ok, output, cost_usd} for the caller to act on.
+    """
+    user_prompt = f"Subject: {subject}\nFrom: {sender}\n\nTranscript:\n{transcript}"
+    res = claude.call(
+        system=SYSTEM, user=user_prompt, model=_get_model(claude),
+        max_tokens=1200, json_mode=True, cached_system=True,
+    )
+    data = res.get("json")
+    if not data or data.get("category") not in CATEGORIES:
+        return {"ok": False, "output": None, "cost_usd": res["cost_usd"],
+                "error": res.get("parse_error") or "invalid response"}
+    return {"ok": True, "output": data, "cost_usd": res["cost_usd"], "error": None}
+
+
 def run(ctx: dict, claude, front) -> dict:
     first_msg = (ctx.get("messages") or [{}])[0]
     subject = ctx["conv"].get("subject") or "(no subject)"

@@ -208,7 +208,9 @@ Add to `scheduler.py`: ingestion sweep every N hours, briefing email daily at 06
 - **M3 — Front loop extraction.** Extend `analyze.py` output → `cos_upsert_loop`,
   with direction logic. Backfill from recent processed conversations.
 - **M4 — Daily briefing assembler** reading the ledger; emailed 06:00 via scheduler.
-- **M5 — Outlook + Teams ingestion** via MCP tools (email/chat sweeps + calendar).
+- **M5 — Cross-channel ingestion.** Channel-agnostic extractor core; Outlook routed
+  into Front as an inbox (config, no code); Teams agent-driven via `ms_ingest`.
+  Calendar context for the briefing follows in a later pass.
 - **M6 — Zoom ingestion**: meeting transcripts → action items → loops.
 - **M7 — Memory & voice**: vault-authored people/priorities/voice notes feed
   briefing ranking and draft tone; fold in the existing corrections feedback loop.

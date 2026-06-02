@@ -65,6 +65,16 @@ CREATE TABLE IF NOT EXISTS memory (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- Cost gate for channels without a Front-style processed tag (Outlook/Teams):
+-- one analysis per thread state. marker = the thread's last_activity timestamp.
+CREATE TABLE IF NOT EXISTS seen (
+  channel    TEXT NOT NULL,
+  source_ref TEXT NOT NULL,
+  marker     TEXT NOT NULL,
+  seen_at    TEXT NOT NULL,
+  PRIMARY KEY (channel, source_ref)
+);
 """
 
 
@@ -263,3 +273,22 @@ def get_memory(key: str = "") -> dict:
             return {key: row[0]} if row else {}
         rows = conn.execute("SELECT key, value FROM memory").fetchall()
     return {r[0]: r[1] for r in rows}
+
+
+# ── Seen gate (one analysis per thread state) ────────────────────────────────
+
+def was_seen(channel: str, source_ref: str, marker: str) -> bool:
+    """True if this thread was already analyzed at this exact state (marker)."""
+    with _connect() as conn:
+        row = conn.execute("SELECT marker FROM seen WHERE channel=? AND source_ref=?",
+                           (channel, source_ref)).fetchone()
+    return row is not None and row[0] == marker
+
+
+def mark_seen(channel: str, source_ref: str, marker: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO seen (channel, source_ref, marker, seen_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(channel, source_ref) DO UPDATE SET marker=excluded.marker, "
+            "seen_at=excluded.seen_at",
+            (channel, source_ref, marker, now_iso()))

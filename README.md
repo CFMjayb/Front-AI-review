@@ -85,4 +85,16 @@ pipeline. Design: [`docs/chief-of-staff/DESIGN.md`](docs/chief-of-staff/DESIGN.m
   markdown→HTML converter so briefings, nudges, and future emails all render well.
 - Config: `SENDER_TRANSPORT` (front), `SENDER_TO`, `SENDER_FRONT_CHANNEL_ID`.
 
-Next: M2 vault render/reconcile, M5 Outlook/Teams, M6 Zoom, M7 memory/voice.
+**M5 (done):** cross-channel ingestion.
+
+- `cos/extract.py` — channel-agnostic core: every channel normalizes to one thread
+  shape and runs the same direction rules + reconcile. Front, Outlook, and Teams
+  loops are therefore identical in meaning. `cos/front_extract.py` is now a thin
+  adapter over it.
+- **Outlook** is ingested by connecting the M365 mailbox to Front as an inbox (no
+  code — just add the inbox to `INBOX_IDS`). See `docs/chief-of-staff/INGESTION.md`.
+- **Teams** is agent-driven: `cos/ms_ingest.py` normalizes chat messages, gates
+  analysis once-per-state via the ledger `seen` table, and upserts `teams` loops.
+  `modules/analyze.py:analyze_transcript()` is the write-free analyzer it uses.
+
+Next: M2 vault render/reconcile, M6 Zoom, M7 memory/voice.
