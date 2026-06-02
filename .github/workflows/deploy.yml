@@ -80,6 +80,13 @@ jobs:
             --image   $IMAGE:${{ github.sha }} \
             --region  $REGION
 
+      # ── Update chief-of-staff briefing job image ─────────────────────────────
+      - name: Update briefing job
+        run: |
+          gcloud run jobs update edom-briefing \
+            --image   $IMAGE:${{ github.sha }} \
+            --region  $REGION
+
       # ── Smoke test ───────────────────────────────────────────────────────────
       - name: Smoke test
         run: |
