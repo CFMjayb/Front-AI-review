@@ -67,9 +67,24 @@ def extract_from_analysis(conv: dict, messages: list[dict], analysis: dict,
     return extract.loop_from_thread(thread, analysis, dry_run=dry_run)
 
 
+# Front statuses that mean "Jay has dealt with this" → resolve the loop.
+# (Open conversations are 'assigned' / 'unassigned'; everything else is handled.)
+_DONE_STATUSES = {"archived", "deleted", "trashed"}
+
+
 def reconcile_open_front_loops(front, *, dry_run: bool = False) -> dict:
-    """Cheap, Claude-free pass over Front loops already in the ledger."""
+    """Cheap, Claude-free pass over Front loops already in the ledger.
+
+    Resolves a loop when either Jay replied (message-direction flip) OR he archived
+    the conversation in Front — so action-only loops (bank approvals, BILL payments)
+    clear when he archives the thread after acting, not just on a reply.
+    """
     def fetch(conv_id: str) -> list[dict]:
         return _normalize(front.get_conversation_messages(conv_id))
 
-    return extract.reconcile(ledger.list_loops(channel="front"), fetch, dry_run=dry_run)
+    def is_done(conv_id: str) -> bool:
+        status = (front.get_conversation(conv_id) or {}).get("status") or ""
+        return status in _DONE_STATUSES
+
+    return extract.reconcile(ledger.list_loops(channel="front"), fetch,
+                             is_done=is_done, dry_run=dry_run)
