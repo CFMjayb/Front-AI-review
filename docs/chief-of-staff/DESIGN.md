@@ -1,0 +1,183 @@
+# Chief of Staff — Design
+
+> A persistent, cross-channel assistant for Jay Bentzen (EDOM) that tracks open
+> loops, briefs him daily, and answers questions across his communication tools.
+>
+> Status: **design / pre-build**. This document is the thing we iterate on before
+> writing code.
+
+## 1. Decisions locked
+
+| Decision | Choice |
+| --- | --- |
+| Interaction model | **Both** — a scheduled daily briefing *and* an on-demand conversational interface |
+| Channels (v1) | **Front email**, **Outlook + calendar + Teams**, **Zoom meetings** |
+| First build target | **Open-loop tracking** (commitments: who's waiting on whom) |
+| Codebase | **Extend this repo** (reuse `auth`, `claude_client`, `front_client`, MCP + scheduler patterns) |
+
+Out of scope for v1 (revisit later): QuickBooks/finance loops, Gmail, SharePoint/OneDrive document loops.
+
+## 2. The core idea
+
+Email triage (what EDOM already does) answers *"what came in?"*. A chief of staff
+answers *"what's still on me, and what am I waiting on?"* — across every channel,
+persisted over time. That ledger of **open loops** is the spine of the whole tool.
+The daily briefing reads from it; the chat interface reads and edits it.
+
+Crucially, `modules/analyze.py` already emits the raw material per conversation:
+`open_questions`, `action_items`, `requires_reply`, `parties`, `deadline`, plus the
+message direction. We don't need a new extractor for Front — we need to **persist**
+that output with a *direction* and *status*, and then add the same extraction for
+Outlook/Teams/Zoom.
+
+## 3. Architecture
+
+Two layers, deliberately separated.
+
+```
+                 ┌──────────────────────────────────────────────┐
+                 │  Layer 2: SURFACES                            │
+                 │   • Daily briefing (scheduled)                │
+                 │   • Conversational tools (CoS MCP server)     │
+                 └───────────────────┬──────────────────────────┘
+                                     │ reads / edits
+                 ┌───────────────────▼──────────────────────────┐
+                 │  Layer 1: MEMORY — the open-loop ledger       │
+                 │   SQLite: loops, people, profile              │
+                 └───────────────────▲──────────────────────────┘
+                                     │ writes (upserts)
+                 ┌───────────────────┴──────────────────────────┐
+                 │  INGESTION — channel sweeps → loop extraction │
+                 │   Front (front_client) · Outlook · Teams ·    │
+                 │   Zoom   (via MCP tools available to agent)   │
+                 └──────────────────────────────────────────────┘
+```
+
+### Why a ledger + agent (not one big batch script)
+
+Outlook, Teams, and Zoom reach *this* environment as **MCP tools bound to the
+agent session**, not as Python SDKs with their own service credentials. Front is
+the only channel the standalone pipeline can hit directly today. So the design
+that works *now*, with no new credentials, is:
+
+- **Layer 1 (ledger)** is a plain library + an MCP server. It owns persistence and
+  has zero channel knowledge. Buildable and testable immediately.
+- **Ingestion** is an *agent procedure*: on a schedule (or on demand) an agent
+  sweeps each channel using whatever tools it has — `front_client` directly for
+  Front, MCP tools for Outlook/Teams/Zoom — extracts commitments, and writes them
+  to the ledger via `cos_upsert_loop`. This is the Codex/OpenClaw "agent with
+  tools + durable memory" pattern.
+
+This keeps each channel pluggable: adding QuickBooks loops later means teaching the
+ingestion agent one more sweep, not rewriting storage or surfaces.
+
+## 4. Data model (`data/cos.db`, SQLite)
+
+```sql
+-- One row per open commitment / unanswered thread.
+CREATE TABLE loops (
+  id            TEXT PRIMARY KEY,   -- stable hash(channel, source_ref, direction)
+  direction     TEXT NOT NULL,      -- 'i_owe' | 'owed_to_me'
+  counterparty  TEXT NOT NULL,      -- name or email of the other side
+  summary       TEXT NOT NULL,      -- "Send the vestry the Q3 budget draft"
+  channel       TEXT NOT NULL,      -- 'front'|'outlook'|'teams'|'zoom'
+  source_ref    TEXT NOT NULL,      -- conv/message/meeting id
+  source_link   TEXT,               -- deep link back to the item
+  status        TEXT NOT NULL,      -- 'open'|'waiting'|'snoozed'|'done'|'dropped'
+  confidence    REAL,               -- extractor confidence 0..1
+  due_at        TEXT,               -- ISO date or NULL
+  first_seen    TEXT NOT NULL,      -- ISO timestamp
+  last_activity TEXT,               -- ISO timestamp of latest message in thread
+  last_reviewed TEXT,               -- when ingestion last touched this row
+  snooze_until  TEXT,               -- ISO; hidden from briefing until then
+  notes         TEXT
+);
+
+-- Lightweight memory about recurring counterparties.
+CREATE TABLE people (
+  key         TEXT PRIMARY KEY,     -- normalized email
+  name        TEXT,
+  role        TEXT,                 -- 'bishop','vendor','clergy',...
+  importance  INTEGER,              -- 1..5, biases briefing ordering
+  notes       TEXT
+);
+
+-- Single-row free-form memory: Jay's priorities, voice, standing instructions.
+CREATE TABLE profile (
+  key   TEXT PRIMARY KEY,           -- 'priorities','voice','standing_orders'
+  value TEXT
+);
+```
+
+**Direction logic.** Per thread we know the last message's sender and whether a
+reply is required:
+
+- Last inbound is from the counterparty **and** `requires_reply` / has an open
+  question → `i_owe` (they're waiting on Jay).
+- Jay sent the last message asking something **and** it's been quiet ≥ N days →
+  `owed_to_me` (Jay is waiting on them).
+- Zoom action items map to `i_owe` when the owner is Jay, `owed_to_me` otherwise.
+
+**Idempotency.** `id = hash(channel + source_ref + direction)`. Re-sweeping the
+same thread *updates* the row (status, last_activity) instead of duplicating it.
+A thread that gets a reply flips `i_owe`→resolved or updates `last_activity`.
+
+## 5. Surfaces
+
+### 5a. CoS MCP server (`cos_mcp_server.py`)
+Mirrors `mcp_server.py` (FastMCP, same API-key middleware). Tools:
+
+- `cos_list_loops(direction?, channel?, status?, overdue_only?)` — query the ledger.
+- `cos_upsert_loop(...)` — ingestion writes here; agent can too.
+- `cos_resolve_loop(id, status)` — mark `done`/`dropped`/`snoozed`.
+- `cos_snooze_loop(id, until)` — hide until a date.
+- `cos_brief(window='today')` — return the assembled briefing payload (loops due,
+  overdue, gone-quiet, plus today's calendar pulled live).
+- `cos_remember(key, value)` / `cos_people_upsert(...)` — write to memory.
+
+This is what makes it **conversational**: from Claude Code or chat, Jay asks
+"what do I owe people this week?" and the agent calls `cos_list_loops`.
+
+### 5b. Daily briefing (`cos/briefing.py`, scheduled)
+Assembles a markdown brief, written like the existing `digest.py`:
+
+1. **Top of mind** — overdue `i_owe` loops, ranked by counterparty importance + age.
+2. **Waiting on others** — `owed_to_me` loops gone quiet past threshold.
+3. **Today's calendar** — pulled live from Outlook at briefing time, with relevant
+   loops attached to each meeting ("prep: you owe Fr. Lee the agenda").
+4. **New since yesterday** — loops first seen in the last 24h.
+5. **Closing note.**
+
+Delivery: write to `data/briefings/<date>.md` (matches digest), and optionally post
+as a Front comment or email draft for review.
+
+### 5c. Scheduler hook
+Add to `scheduler.py`: ingestion sweep every N hours, briefing daily at 06:30.
+
+## 6. Build sequence
+
+- **M1 — Ledger + CoS MCP server (open-loop tracking).** SQLite schema, ledger
+  module, MCP tools, idempotent upsert. *Testable on Front today, no new creds.*
+- **M2 — Front loop extraction.** Extend `analyze.py` output → `cos_upsert_loop`,
+  with direction logic. Backfill from recent processed conversations.
+- **M3 — Daily briefing assembler** reading the ledger; wire into scheduler.
+- **M4 — Outlook + Teams ingestion** via MCP tools (email/chat sweeps + calendar).
+- **M5 — Zoom ingestion**: meeting transcripts → action items → loops.
+- **M6 — Memory & voice**: people/priorities tables feed briefing ranking and
+  draft tone; fold in the existing corrections feedback loop.
+
+## 7. Principles carried over from EDOM
+
+- **Drafts, never auto-sends.** Every outward write is reviewed by Jay.
+- **Cost control.** Reuse the one-review gate; ingestion reuses existing analysis
+  output rather than re-billing Claude per thread.
+- **Human-in-the-loop corrections** train the ledger and memory over time.
+
+## 8. Open questions for Jay
+
+1. **Briefing delivery** — Front comment, an email draft to yourself, or just a file
+   you read in the morning?
+2. **"Gone quiet" threshold** — how many days of silence before a thing you're
+   waiting on surfaces (default 3)?
+3. **Counterparty scope** — track loops with everyone, or only people above an
+   importance bar (avoid noise from one-off senders)?
