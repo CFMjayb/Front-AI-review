@@ -37,10 +37,21 @@ def _run_digest():
         logger.error(f"Scheduled digest run failed: {exc}")
 
 
+def _run_briefing():
+    logger.info("Scheduled chief-of-staff briefing starting")
+    try:
+        from cos.briefing import run_briefing
+        run_briefing()
+    except Exception as exc:
+        logger.error(f"Scheduled briefing run failed: {exc}")
+
+
 def main():
-    logger.info(f"EDOM scheduler starting — pipeline every {RUN_INTERVAL_HOURS}h, digest Mondays 07:00")
+    logger.info(f"EDOM scheduler starting — pipeline every {RUN_INTERVAL_HOURS}h, "
+                f"briefing daily 06:00, digest Mondays 07:00")
 
     schedule.every(RUN_INTERVAL_HOURS).hours.do(_run_pipeline)
+    schedule.every().day.at("06:00").do(_run_briefing)
     schedule.every().monday.at("07:00").do(_run_digest)
 
     def _stop(signum, frame):

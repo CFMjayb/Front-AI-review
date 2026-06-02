@@ -67,4 +67,14 @@ pipeline. Design: [`docs/chief-of-staff/DESIGN.md`](docs/chief-of-staff/DESIGN.m
   number of open loops. Runs at the end of every pipeline run.
 - Tests: `python -m pytest tests/`
 
-Next: M2 vault render/reconcile, M4 daily briefing, M5 Outlook/Teams, M6 Zoom.
+**M4 (done):** daily briefing assembled from the ledger.
+
+- `cos/briefing.py` — builds the 6 AM email (on you / waiting / new / filtered)
+  from SQLite. Section body is deterministic; an optional Claude narrator adds the
+  warm headline + closing. Snoozed/resolved loops are excluded; `i_owe` ordered by
+  importance then due date.
+- Scheduled daily at 06:00 in `scheduler.py`; output saved to `data/briefings/`.
+- Delivery transport (Front / Outlook / SMTP) is pluggable via `BRIEFING_DELIVERY`;
+  default `file` persists the brief until a sending channel is chosen.
+
+Next: choose briefing email transport, M2 vault render/reconcile, M5 Outlook/Teams, M6 Zoom.
