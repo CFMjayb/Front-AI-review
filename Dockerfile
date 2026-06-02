@@ -7,8 +7,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY *.py ./
 COPY modules/ modules/
+COPY cos/ cos/
 
-RUN mkdir -p data/digests
+RUN mkdir -p data/digests data/briefings
 
 ENV PORT=8080
 ENV USE_SECRET_MANAGER=true
