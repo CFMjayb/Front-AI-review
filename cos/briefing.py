@@ -67,7 +67,9 @@ def gather() -> dict:
 
 
 def _loop_line(loop: dict) -> str:
-    bits = [f"**{loop['counterparty']}** — {loop['summary']}"]
+    num = loop.get("num")
+    tag = f"**#{num}** · " if num else ""
+    bits = [f"{tag}**{loop['counterparty']}** — {loop['summary']}"]
     if loop.get("due_at"):
         bits.append(f" _(due {loop['due_at'][:10]})_")
     if loop.get("source_link"):
@@ -105,7 +107,7 @@ def render(sections: dict, *, date: str = "", headline: str = "", closing: str =
         lines += [headline, ""]
 
     lines.append(f"## 🔴 On you ({len(on_you)})")
-    lines += [f"{i}. {_loop_line(l)}" for i, l in enumerate(on_you, 1)] or ["_Nothing on you. Enjoy it._"]
+    lines += [f"- {_loop_line(l)}" for l in on_you] or ["_Nothing on you. Enjoy it._"]
     lines.append("")
 
     lines.append(f"## ⏳ Waiting on others — quiet 36 h+ ({len(waiting)})")

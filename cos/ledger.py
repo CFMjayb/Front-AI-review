@@ -32,6 +32,7 @@ MANUAL_STATUSES = {"done", "dropped", "snoozed"}
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS loops (
   id            TEXT PRIMARY KEY,
+  num           INTEGER,            -- stable human-facing catalog number (#42)
   direction     TEXT NOT NULL,
   counterparty  TEXT NOT NULL,
   counterparty_email TEXT,
@@ -107,6 +108,22 @@ def loop_id(channel: str, source_ref: str, direction: str) -> str:
     return f"{channel}-{hashlib.sha1(raw).hexdigest()[:10]}-{direction}"
 
 
+def _migrate(conn) -> None:
+    """Idempotent schema migrations for existing databases."""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(loops)").fetchall()]
+    if "num" not in cols:
+        conn.execute("ALTER TABLE loops ADD COLUMN num INTEGER")
+        # Backfill stable numbers in catalog order (oldest first).
+        rows = conn.execute("SELECT id FROM loops ORDER BY first_seen ASC, rowid ASC").fetchall()
+        for i, r in enumerate(rows, 1):
+            conn.execute("UPDATE loops SET num=? WHERE id=?", (i, r[0]))
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_loops_num ON loops(num)")
+
+
+def _next_num(conn) -> int:
+    return int(conn.execute("SELECT COALESCE(MAX(num), 0) + 1 FROM loops").fetchone()[0])
+
+
 @contextmanager
 def _connect():
     path = _db_path()
@@ -115,6 +132,7 @@ def _connect():
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
         yield conn
         conn.commit()
     finally:
@@ -156,13 +174,13 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
 
         if existing is None:
             conn.execute(
-                """INSERT INTO loops (id, direction, counterparty, counterparty_email,
+                """INSERT INTO loops (id, num, direction, counterparty, counterparty_email,
                        summary, channel, source_ref, source_link, category, status,
                        importance, confidence, due_at, first_seen, last_activity,
                        last_reviewed)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (lid, direction, counterparty, counterparty_email, summary, channel,
-                 source_ref, source_link, category, status or "open", importance,
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (lid, _next_num(conn), direction, counterparty, counterparty_email, summary,
+                 channel, source_ref, source_link, category, status or "open", importance,
                  confidence, due_at or None, now, last_activity, now),
             )
         else:
@@ -190,6 +208,25 @@ def get_loop(loop_id_: str) -> Optional[dict]:
     with _connect() as conn:
         row = conn.execute("SELECT * FROM loops WHERE id = ?", (loop_id_,)).fetchone()
     return _row_to_dict(row)
+
+
+def get_loop_by_num(num: int) -> Optional[dict]:
+    """Look up a loop by its stable catalog number (#num)."""
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM loops WHERE num = ?", (int(num),)).fetchone()
+    return _row_to_dict(row)
+
+
+def resolve_by_num(num: int, status: str) -> Optional[dict]:
+    """Resolve a loop by catalog number. Returns None if the number is unknown."""
+    loop = get_loop_by_num(num)
+    return resolve_loop(loop["id"], status) if loop else None
+
+
+def snooze_by_num(num: int, until: str) -> Optional[dict]:
+    """Snooze a loop by catalog number. Returns None if the number is unknown."""
+    loop = get_loop_by_num(num)
+    return snooze_loop(loop["id"], until) if loop else None
 
 
 def list_loops(*, direction: str = "", channel: str = "", status: str = "",
