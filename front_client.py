@@ -58,7 +58,16 @@ def _request(method: str, path_or_url: str, token: str, body: Optional[dict] = N
         if exc.code == 401:
             raise FrontApiError(401, "Front rejected the token. Check FRONT_API_TOKEN.") from exc
         if exc.code == 403:
-            raise FrontApiError(403, "Token valid but missing required scope.") from exc
+            detail = body_text.strip()[:300]
+            # A 403 can come from Front (missing scope) OR from an egress proxy
+            # blocking the host (e.g. "Host not in allowlist"). Surface the body
+            # so the two are distinguishable instead of always blaming scope.
+            msg = "Front returned 403."
+            if "allowlist" in detail.lower() or "host" in detail.lower():
+                msg = "403 from network egress proxy, not Front — host likely not allowlisted."
+            elif detail:
+                msg = "Front returned 403 (token may be missing required scope)."
+            raise FrontApiError(403, f"{msg} Body: {detail!r}" if detail else msg) from exc
         if exc.code == 429:
             retry_after = int(exc.headers.get("Retry-After", "5"))
             time.sleep(retry_after)
@@ -142,7 +151,9 @@ class FrontClient:
                                   limit: int = 50, max_pages: int = 5) -> list[dict]:
         params: dict[str, Any] = {}
         if status:
-            params["q[statuses][]"] = status
+            # Front has no "open" status — an open conversation is assigned OR
+            # unassigned (vs archived/deleted). Expand so the filter matches reality.
+            params["q[statuses][]"] = ["assigned", "unassigned"] if status == "open" else status
         if since_ms:
             params["q[after]"] = since_ms // 1000
         return _collect_pages(f"/inboxes/{inbox_id}/conversations", self.token,
@@ -155,7 +166,8 @@ class FrontClient:
         if since_ms:
             params["q[after]"] = since_ms // 1000
         if status:
-            params["q[statuses][]"] = status
+            # See list_inbox_conversations: "open" → assigned + unassigned.
+            params["q[statuses][]"] = ["assigned", "unassigned"] if status == "open" else status
         return _collect_pages(f"/teammates/{teammate_id}/conversations", self.token,
                               limit=limit, max_pages=max_pages, params=params)
 
@@ -289,6 +301,22 @@ class FrontClient:
         data, _ = _request("POST", path, self.token, body=payload)
         return data
 
+    def send_message(self, channel_id: str, *, to: list[str], subject: str, body: str,
+                     text: Optional[str] = None, author_id: Optional[str] = None) -> dict:
+        """Send an outbound email from a channel (creates + sends, not a draft).
+
+        body is HTML; pass text for the plain-text alternative. Used by the
+        Chief-of-Staff sender layer for self-addressed briefings/notifications.
+        """
+        payload: dict[str, Any] = {"to": to, "subject": subject, "body": body,
+                                   "options": {"archive": True}}
+        if text:
+            payload["text"] = text
+        if author_id:
+            payload["author_id"] = author_id
+        data, _ = _request("POST", f"/channels/{channel_id}/messages", self.token, body=payload)
+        return data
+
     # ── Helpers ─────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -310,9 +338,16 @@ class FrontClient:
         parts: list[str] = []
         total = 0
         for m in ordered:
+            # Front puts the sender in recipients[role='from']; `author` is null on
+            # inbound messages (the sender is a contact, not a teammate).
+            recips = m.get("recipients") or []
+            frm = next((r for r in recips if r.get("role") == "from"), None)
             author = m.get("author") or {}
-            sender = author.get("email") or author.get("handle") or "unknown"
-            recipients = ", ".join(r.get("handle", "") for r in (m.get("to") or []))
+            sender = ((frm or {}).get("handle") or author.get("email")
+                      or author.get("handle") or "unknown")
+            to_handles = [r.get("handle", "") for r in recips if r.get("role") == "to"]
+            recipients = ", ".join(to_handles or
+                                   [r.get("handle", "") for r in (m.get("to") or [])])
             ts = m.get("created_at")
             date = time.strftime("%Y-%m-%d %H:%M", time.gmtime(ts)) if ts else "unknown"
             body = FrontClient.extract_plain_text_body(m)

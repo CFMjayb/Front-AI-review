@@ -8,6 +8,9 @@ venv/
 data/state.json
 data/digests/*
 !data/digests/.gitkeep
+data/cos.db
+data/briefings/*
+!data/briefings/.gitkeep
 *.log
 .DS_Store
 .vscode/

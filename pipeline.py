@@ -11,10 +11,15 @@ from typing import Optional
 
 from auth import get_anthropic_api_key, get_front_api_token
 from claude_client import ClaudeClient
+from cos import front_extract
 from front_client import FrontClient, PROCESSED_TAG
-from modules import analyze, m4_cluster, m8_draft
+from modules import analyze, m4_cluster, m8_draft, prefilter
 
 logger = logging.getLogger(__name__)
+
+# Front has no literal "open" status — an open conversation is assigned OR
+# unassigned (as opposed to archived / deleted / trashed / spam).
+_OPEN_STATUSES = {"open", "assigned", "unassigned"}
 
 REQUIRED_TAGS: list[tuple[str, Optional[str]]] = [
     (PROCESSED_TAG, "blue"),
@@ -72,7 +77,7 @@ def _filter_open(conversations: list[dict]) -> tuple[list[dict], int]:
     active: list[dict] = []
     skipped = 0
     for c in conversations:
-        if (c.get("status") or "open") == "open":
+        if (c.get("status") or "open") in _OPEN_STATUSES:
             active.append(c)
         else:
             skipped += 1
@@ -119,12 +124,44 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
     try:
         messages = front.get_conversation_messages(cid)
         transcript = front.messages_to_transcript(messages)
+
+        # Cheap, AI-free pre-filter: skip the Claude review for obvious bulk /
+        # marketing / bounce mail (saves the per-conversation analysis cost).
+        is_bulk, reason = prefilter.looks_like_bulk(conv, messages)
+        if is_bulk:
+            if not dry_run:
+                front.add_tag(cid, "AI/spam")
+                front.add_tag(cid, PROCESSED_TAG)
+            else:
+                logger.info(f"[dry-run] [prefilter] would tag {cid} AI/spam (bulk)")
+            logger.info(f"[prefilter] {cid} skipped AI review — {reason}")
+            module_results["prefilter"] = {"skipped": True, "reason": reason}
+            return {
+                "conversation_id": cid,
+                "subject": conv.get("subject"),
+                "duration_s": time.time() - started,
+                "cost_usd": 0.0,
+                "errored": False,
+                "prefiltered": True,
+                "modules": module_results,
+            }
+
         ctx = {"conv": conv, "messages": messages, "transcript": transcript, "dry_run": dry_run}
 
         # Single consolidated analysis (replaces M1-M7)
         result = analyze.run(ctx, claude, front)
         module_results["analyze"] = result
         cost += result.get("cost_usd", 0)
+
+        # CoS open-loop extraction — reuses the analysis above, no extra Claude cost
+        if result["ok"]:
+            try:
+                loop = front_extract.extract_from_analysis(
+                    conv, messages, result["output"], dry_run=dry_run)
+                if loop:
+                    module_results["loop"] = loop
+            except Exception as exc:
+                logger.warning(f"Loop extraction failed for {cid}: {exc}")
 
         # M8 draft — only when reply required and urgency is urgent or high
         if result["ok"]:
@@ -201,7 +238,7 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
 
     # M4 cluster — runs over the full batch after individual conversations
     m4_result = None
-    processed_results = [r for r in results if not r["errored"]]
+    processed_results = [r for r in results if not r["errored"] and not r.get("prefiltered")]
     if len(processed_results) >= 2:
         logger.info(f"Running M4 cluster over {len(processed_results)} conversations")
         try:
@@ -221,9 +258,19 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
         except Exception as exc:
             logger.warning(f"Corrections scan failed: {exc}")
 
-    logger.info(f"Pipeline complete: processed={sum(1 for r in results if not r['errored'])} "
+    # CoS loop reconcile — Claude-free pass that closes/refreshes existing loops
+    loop_reconcile = None
+    try:
+        loop_reconcile = front_extract.reconcile_open_front_loops(front, dry_run=dry_run)
+    except Exception as exc:
+        logger.warning(f"Loop reconcile failed: {exc}")
+
+    prefiltered = sum(1 for r in results if r.get("prefiltered"))
+    analyzed = sum(1 for r in results if not r["errored"] and not r.get("prefiltered"))
+    logger.info(f"Pipeline complete: analyzed={analyzed} prefiltered(spam, no AI)={prefiltered} "
                 f"errored={sum(1 for r in results if r['errored'])} skipped={len(skipped)} "
                 f"cost=${total_cost:.4f}")
 
     return {"results": results, "m4": m4_result, "total_cost_usd": total_cost,
-            "skipped": len(skipped)}
+            "skipped": len(skipped), "prefiltered": prefiltered,
+            "loop_reconcile": loop_reconcile}
