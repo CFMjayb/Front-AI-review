@@ -205,3 +205,26 @@ def run_briefing(*, claude=None, filtered_count: int | None = None,
     logger.info(f"Briefing written to {filepath} (delivery: {transport})")
     return {"file": str(filepath), "subject": subject, "transport": transport,
             "counts": {k: len(v) for k, v in sections.items() if isinstance(v, list)}}
+
+
+def main() -> None:
+    """Entrypoint for the scheduled Cloud Run briefing job (`python -m cos.briefing`)."""
+    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
+                        format="%(asctime)s %(levelname)s %(name)s — %(message)s")
+    claude = None
+    try:
+        from auth import get_anthropic_api_key
+        from claude_client import ClaudeClient
+        claude = ClaudeClient(
+            api_key=get_anthropic_api_key(),
+            default_model=os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7"),
+            fast_model=os.environ.get("ANTHROPIC_MODEL_FAST", "claude-haiku-4-5"))
+    except Exception as exc:  # narrator is optional; brief still renders without it
+        logger.warning(f"briefing narrator unavailable: {exc}")
+    result = run_briefing(claude=claude)
+    logger.info(f"Briefing complete: delivery={result.get('transport')} "
+                f"counts={result.get('counts')}")
+
+
+if __name__ == "__main__":
+    main()
