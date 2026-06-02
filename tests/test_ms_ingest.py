@@ -106,6 +106,49 @@ def test_dry_run_writes_nothing(mods):
     assert ledger.was_seen("teams", "chat_5", "x") is False  # not marked seen
 
 
+def _real_item(chat, name, when, text):
+    """Mirror chat_message_search: email null, HTML summary, ISO ms timestamp."""
+    return {"chatId": chat, "chatUri": f"teams:///chats/{chat}",
+            "from": {"displayName": name, "email": None},
+            "createdDateTime": when, "summary": f"<p>{text}</p>"}
+
+
+def test_teams_search_adapter_direction_by_name(mods):
+    _, ms = mods
+    items = [
+        _real_item("c1", "Sam Marlow", "2026-06-01T21:51:21.598Z", "I saved the IWO &amp; emailed you"),
+        _real_item("c1", "Jay Boggs", "2026-06-01T22:00:00.000Z", "Thanks, got it"),
+    ]
+    threads = ms.threads_from_teams_search(items, owner_names={"jay boggs"})
+    assert len(threads) == 1
+    msgs = {m["sender_name"]: m for m in threads[0]["messages"]}
+    assert msgs["Jay Boggs"]["inbound"] is False     # owner → outbound
+    assert msgs["Sam Marlow"]["inbound"] is True      # other → inbound
+
+
+def test_teams_search_adapter_strips_html_and_parses_ms(mods):
+    _, ms = mods
+    items = [_real_item("c1", "Sam", "2026-06-01T21:51:21.598Z", "saved it &amp; sent")]
+    thread = ms.threads_from_teams_search(items, owner_names=set())[0]
+    m = thread["messages"][0]
+    assert m["text"] == "saved it & sent"   # tags stripped, entities decoded
+    assert m["ts_epoch"] > 0                # millisecond ISO parsed
+
+
+def test_teams_search_adapter_groups_and_sets_recipients(mods):
+    _, ms = mods
+    items = [
+        _real_item("c1", "Sally Swygert", "2026-05-29T20:00:00.000Z", "q1"),
+        _real_item("c1", "Jay Boggs", "2026-05-29T20:05:00.000Z", "a1"),
+        _real_item("c2", "Mark", "2026-05-29T17:15:40.934Z", "call me"),
+    ]
+    threads = ms.threads_from_teams_search(items, owner_names={"jay boggs"})
+    assert {t["source_ref"] for t in threads} == {"c1", "c2"}
+    c1 = next(t for t in threads if t["source_ref"] == "c1")
+    jay = next(m for m in c1["messages"] if m["sender_name"] == "Jay Boggs")
+    assert "Sally Swygert" in jay["recipients"]   # other participant becomes recipient
+
+
 def test_spam_thread_creates_no_loop(mods):
     ledger, ms = mods
     import time

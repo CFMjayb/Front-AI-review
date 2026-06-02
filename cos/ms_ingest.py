@@ -15,9 +15,13 @@ ingest() is channel-agnostic, so the same path serves any future agent-fetched
 channel. See docs/chief-of-staff/INGESTION.md for the playbook. Pure functions —
 fully testable with fake payloads and a fake Claude client.
 """
+import datetime
+import html as _html
 import logging
 import os
+import re
 import time
+from collections import defaultdict
 
 from cos import extract, ledger
 from modules import analyze
@@ -27,6 +31,74 @@ logger = logging.getLogger(__name__)
 
 def _owner_emails() -> set[str]:
     return extract.owner_emails()
+
+
+def _owner_names() -> set[str]:
+    """Display names that are "Jay" — Teams identifies senders by name, not email."""
+    raw = os.environ.get("COS_OWNER_NAMES", "")
+    return {v.strip().lower() for v in raw.split(",") if v.strip()}
+
+
+def _strip_html(s: str) -> str:
+    if not s:
+        return ""
+    return re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", " ", s))).strip()
+
+
+def _parse_iso(s: str) -> float:
+    if not s:
+        return 0.0
+    s = re.sub(r"\.\d+", "", s).replace("Z", "")
+    s = re.sub(r"[+-]\d\d:?\d\d$", "", s)
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(s, fmt).replace(
+                tzinfo=datetime.timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return 0.0
+
+
+def threads_from_teams_search(items: list[dict], *, owner_names: set[str] | None = None,
+                              owner_emails: set[str] | None = None) -> list[dict]:
+    """Build normalized threads directly from raw chat_message_search output.
+
+    Real shape: each item has chatId, from.displayName (email often null),
+    createdDateTime (ISO), and summary (HTML). Groups by chat; direction is set by
+    matching the sender's name/email against the owner identity.
+    """
+    owners_e = owner_emails if owner_emails is not None else _owner_emails()
+    owners_n = owner_names if owner_names is not None else _owner_names()
+
+    chats: dict[str, list[dict]] = defaultdict(list)
+    links: dict[str, str] = {}
+    for it in items:
+        cid = it.get("chatId")
+        if cid:
+            chats[cid].append(it)
+            links.setdefault(cid, it.get("chatUri") or it.get("webUrl") or "")
+
+    threads: list[dict] = []
+    for cid, msgs in chats.items():
+        parsed = [{
+            "name": ((m.get("from") or {}).get("displayName") or "").strip(),
+            "email": ((m.get("from") or {}).get("email") or "").lower(),
+            "ts": _parse_iso(m.get("createdDateTime")),
+            "text": _strip_html(m.get("summary") or m.get("body")),
+        } for m in msgs]
+        participants = {p["name"] for p in parsed if p["name"]}
+
+        norm = []
+        for p in parsed:
+            is_owner = (p["email"] and p["email"] in owners_e) or (p["name"].lower() in owners_n)
+            norm.append(extract.make_message(
+                inbound=not is_owner, ts_epoch=p["ts"], sender_name=p["name"],
+                sender_email=p["email"], recipients=sorted(participants - {p["name"]}),
+                text=p["text"]))
+        threads.append(extract.build_thread(
+            channel="teams", source_ref=cid, subject="Teams chat",
+            source_link=links.get(cid, ""), messages=norm))
+    return threads
 
 
 def _normalize_ms_messages(messages: list[dict], owners: set[str]) -> list[dict]:

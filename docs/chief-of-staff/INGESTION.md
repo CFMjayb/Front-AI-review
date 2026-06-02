@@ -37,16 +37,10 @@ runs this a few times a day.
 
 1. **Fetch** recent Teams messages with the `chat_message_search` MCP tool over the
    lookback window (e.g. `afterDateTime: "36 hours ago"`). Page via `nextOffset`.
-2. **Group** messages by chat (`chat_id`). For each chat, build a list of message
-   dicts:
-
-   ```python
-   {"sender_email": "...", "sender_name": "...", "recipients": ["..."],
-    "ts_epoch": 1733155200, "text": "..."}
-   ```
-
-3. **Normalize + ingest** by running this in the repo (it identifies which side is
-   Jay from `COS_OWNER_EMAILS`, analyzes once per state, and upserts loops):
+2. **Normalize + ingest** by passing the *raw* search results straight in — the
+   adapter groups by chat, strips the HTML `summary`, parses the ISO timestamp, and
+   sets direction by matching the sender's display name against `COS_OWNER_NAMES`
+   (Teams returns `from.email` as null, so name matching is required):
 
    ```python
    import os
@@ -58,19 +52,20 @@ runs this a few times a day.
                          default_model=os.environ.get("ANTHROPIC_MODEL_ANALYZE", "claude-sonnet-4-6"),
                          fast_model=os.environ.get("ANTHROPIC_MODEL_FAST", "claude-haiku-4-5"))
 
-   threads = [ms_ingest.thread_from_teams(chat_id=cid, messages=msgs, web_link=link)
-              for cid, (msgs, link) in chats.items()]
+   threads = ms_ingest.threads_from_teams_search(raw_search_items)
    print(ms_ingest.ingest(threads, claude))   # {analyzed, created, skipped, errored, cost_usd}
    ```
 
-4. **Reconcile** (optional, Claude-free): to auto-close Teams loops once the other
+3. **Reconcile** (optional, Claude-free): to auto-close Teams loops once the other
    side replies, fetch the latest message per open Teams loop and call
    `cos.extract.reconcile(ledger.list_loops(channel="teams"), fetch_fn)`.
 
 ### Config
 
-- `COS_OWNER_EMAILS` — comma-separated addresses that are "you" (drives inbound vs.
-  outbound direction). Falls back to `SENDER_TO`.
+- `COS_OWNER_NAMES` — display names that are "you" (e.g. `Jay Boggs,Jay Bentzen`).
+  **Required for Teams**, since chat messages carry a display name, not an email.
+- `COS_OWNER_EMAILS` — addresses that are "you" (drives email direction). Falls back
+  to `SENDER_TO`.
 - `QUIET_THRESHOLD_HOURS` — silence before an outbound ask becomes `owed_to_me` (36).
 
 ## Calendars — agent-driven (`cos/calendars.py`)
