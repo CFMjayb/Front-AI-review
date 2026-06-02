@@ -14,6 +14,9 @@
 | Channels (v1) | **Front email**, **Outlook + calendar + Teams**, **Zoom meetings** |
 | First build target | **Open-loop tracking** (commitments: who's waiting on whom) |
 | Codebase | **Extend this repo** (reuse `auth`, `claude_client`, `front_client`, MCP + scheduler patterns) |
+| Briefing delivery | **Daily email at 06:00**, sent to Jay |
+| "Gone quiet" threshold | **36 hours** of silence before an `owed_to_me` loop resurfaces |
+| Counterparty scope | **Everyone**, but spam / marketing / unsolicited mail is segregated out of loops and the briefing |
 
 Out of scope for v1 (revisit later): QuickBooks/finance loops, Gmail, SharePoint/OneDrive document loops.
 
@@ -114,13 +117,22 @@ reply is required:
 
 - Last inbound is from the counterparty **and** `requires_reply` / has an open
   question → `i_owe` (they're waiting on Jay).
-- Jay sent the last message asking something **and** it's been quiet ≥ N days →
-  `owed_to_me` (Jay is waiting on them).
+- Jay sent the last message asking something **and** it's been quiet ≥ 36 h
+  (`QUIET_THRESHOLD_HOURS`, default 36) → `owed_to_me` (Jay is waiting on them).
 - Zoom action items map to `i_owe` when the owner is Jay, `owed_to_me` otherwise.
 
 **Idempotency.** `id = hash(channel + source_ref + direction)`. Re-sweeping the
 same thread *updates* the row (status, last_activity) instead of duplicating it.
 A thread that gets a reply flips `i_owe`→resolved or updates `last_activity`.
+
+**Noise segregation.** Scope is everyone, but spam / marketing / unsolicited mail
+must not create loops or clutter the briefing. Ingestion classifies each thread
+(reusing `analyze.py`'s `category` — `spam`, plus a `solicited` boolean) and:
+
+- never creates a loop for `spam` / marketing / unsolicited threads;
+- records them only as a daily count (`briefing` shows "N marketing/spam filtered");
+- keeps a `noise` flag on any borderline row so Jay can correct it, feeding the
+  existing corrections loop.
 
 ## 5. Surfaces
 
@@ -146,13 +158,18 @@ Assembles a markdown brief, written like the existing `digest.py`:
 3. **Today's calendar** — pulled live from Outlook at briefing time, with relevant
    loops attached to each meeting ("prep: you owe Fr. Lee the agenda").
 4. **New since yesterday** — loops first seen in the last 24h.
-5. **Closing note.**
+5. **Filtered** — one line: count of spam/marketing/unsolicited set aside today.
+6. **Closing note.**
 
-Delivery: write to `data/briefings/<date>.md` (matches digest), and optionally post
-as a Front comment or email draft for review.
+**Delivery: a single email to Jay every day at 06:00.** The brief is written to
+`data/briefings/<date>.md` (matches digest) and emailed. Since it's addressed to
+Jay himself, this is the one outward send that is *auto-sent* rather than drafted —
+the human-in-the-loop rule still holds for anything sent to third parties. Send
+mechanism is a config choice (Front channel send, Outlook/Graph, or SMTP);
+defaults to whichever channel already holds a verified sending address.
 
 ### 5c. Scheduler hook
-Add to `scheduler.py`: ingestion sweep every N hours, briefing daily at 06:30.
+Add to `scheduler.py`: ingestion sweep every N hours, briefing email daily at 06:00.
 
 ## 6. Build sequence
 
@@ -173,11 +190,17 @@ Add to `scheduler.py`: ingestion sweep every N hours, briefing daily at 06:30.
   output rather than re-billing Claude per thread.
 - **Human-in-the-loop corrections** train the ledger and memory over time.
 
-## 8. Open questions for Jay
+## 8. Resolved details
 
-1. **Briefing delivery** — Front comment, an email draft to yourself, or just a file
-   you read in the morning?
-2. **"Gone quiet" threshold** — how many days of silence before a thing you're
-   waiting on surfaces (default 3)?
-3. **Counterparty scope** — track loops with everyone, or only people above an
-   importance bar (avoid noise from one-off senders)?
+1. **Briefing delivery** — a single email to Jay every day at **06:00** (auto-sent;
+   self-addressed, so it does not violate the no-auto-send-to-others rule).
+2. **"Gone quiet" threshold** — **36 hours** of silence (`QUIET_THRESHOLD_HOURS`).
+3. **Counterparty scope** — **everyone**, with spam / marketing / unsolicited mail
+   classified out of the ledger and shown only as a filtered count in the briefing.
+
+### Remaining to decide during M3/M4 (not blocking M1)
+
+- Which verified address/channel actually *sends* the 06:00 email (Front vs Outlook
+  vs SMTP).
+- Whether "unsolicited but legitimate" (e.g. a first-time real vendor) should create
+  a low-priority loop or stay filtered.
