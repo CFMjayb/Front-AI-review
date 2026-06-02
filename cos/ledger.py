@@ -354,6 +354,17 @@ def list_events_between(start_iso: str, end_iso: str) -> list[dict]:
     return [_event_row(r) for r in rows]
 
 
+def list_events_overlapping(start_iso: str, end_iso: str) -> list[dict]:
+    """Events that overlap the [start, end) window — so a multi-day all-day event
+    appears on every day it spans. All-day banners sort first."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE start_at < ? AND COALESCE(end_at, start_at) > ? "
+            "ORDER BY is_all_day DESC, start_at",
+            (end_iso, start_iso)).fetchall()
+    return [_event_row(r) for r in rows]
+
+
 def delete_events_before(iso: str) -> int:
     with _connect() as conn:
         cur = conn.execute("DELETE FROM events WHERE start_at < ?", (iso,))

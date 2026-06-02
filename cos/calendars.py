@@ -137,7 +137,7 @@ def events_for_day(day: datetime.date | None = None) -> list[dict]:
     end_local = start_local + datetime.timedelta(days=1)
     start = start_local.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     end = end_local.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return ledger.list_events_between(start, end)
+    return ledger.list_events_overlapping(start, end)
 
 
 def detect_conflicts(events: list[dict]) -> set[str]:

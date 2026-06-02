@@ -123,6 +123,16 @@ def test_briefing_today_section(mods):
     assert "10:00–11:00" in body  # UTC in tests
 
 
+def test_all_day_event_shows_every_spanned_day(mods):
+    _, cal, _ = mods
+    cal.ingest_events([{"id": "conf", "subject": "Bishops' College",
+                        "start": "2026-06-01", "end": "2026-06-06", "isAllDay": True}])
+    mid = [e["subject"] for e in cal.events_for_day(datetime.date(2026, 6, 3))]
+    assert "Bishops' College" in mid          # middle day
+    after = [e["subject"] for e in cal.events_for_day(datetime.date(2026, 6, 7))]
+    assert "Bishops' College" not in after    # past the span
+
+
 def test_millisecond_timestamps_parse(mods):
     _, cal, _ = mods
     ev = cal.event_from_outlook(_raw("Mtg", "2026-06-02T17:00:00.000Z", "2026-06-02T18:00:00.000Z"))
