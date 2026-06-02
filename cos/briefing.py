@@ -67,7 +67,9 @@ def gather() -> dict:
 
 
 def _loop_line(loop: dict) -> str:
-    bits = [f"**{loop['counterparty']}** — {loop['summary']}"]
+    num = loop.get("num")
+    tag = f"**#{num}** · " if num else ""
+    bits = [f"{tag}**{loop['counterparty']}** — {loop['summary']}"]
     if loop.get("due_at"):
         bits.append(f" _(due {loop['due_at'][:10]})_")
     if loop.get("source_link"):
@@ -105,7 +107,7 @@ def render(sections: dict, *, date: str = "", headline: str = "", closing: str =
         lines += [headline, ""]
 
     lines.append(f"## 🔴 On you ({len(on_you)})")
-    lines += [f"{i}. {_loop_line(l)}" for i, l in enumerate(on_you, 1)] or ["_Nothing on you. Enjoy it._"]
+    lines += [f"- {_loop_line(l)}" for l in on_you] or ["_Nothing on you. Enjoy it._"]
     lines.append("")
 
     lines.append(f"## ⏳ Waiting on others — quiet 36 h+ ({len(waiting)})")
@@ -203,3 +205,26 @@ def run_briefing(*, claude=None, filtered_count: int | None = None,
     logger.info(f"Briefing written to {filepath} (delivery: {transport})")
     return {"file": str(filepath), "subject": subject, "transport": transport,
             "counts": {k: len(v) for k, v in sections.items() if isinstance(v, list)}}
+
+
+def main() -> None:
+    """Entrypoint for the scheduled Cloud Run briefing job (`python -m cos.briefing`)."""
+    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
+                        format="%(asctime)s %(levelname)s %(name)s — %(message)s")
+    claude = None
+    try:
+        from auth import get_anthropic_api_key
+        from claude_client import ClaudeClient
+        claude = ClaudeClient(
+            api_key=get_anthropic_api_key(),
+            default_model=os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7"),
+            fast_model=os.environ.get("ANTHROPIC_MODEL_FAST", "claude-haiku-4-5"))
+    except Exception as exc:  # narrator is optional; brief still renders without it
+        logger.warning(f"briefing narrator unavailable: {exc}")
+    result = run_briefing(claude=claude)
+    logger.info(f"Briefing complete: delivery={result.get('transport')} "
+                f"counts={result.get('counts')}")
+
+
+if __name__ == "__main__":
+    main()

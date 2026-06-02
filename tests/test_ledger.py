@@ -84,6 +84,28 @@ def test_snooze(ledger):
     assert snoozed["snooze_until"] == "2026-06-10T00:00:00Z"
 
 
+def test_loops_get_sequential_stable_numbers(ledger):
+    a = _sample(ledger, source_ref="a")
+    b = _sample(ledger, source_ref="b")
+    c = _sample(ledger, source_ref="c")
+    assert [a["num"], b["num"], c["num"]] == [1, 2, 3]
+    # Re-sweeping a thread keeps its number (stable reference).
+    a2 = _sample(ledger, source_ref="a", summary="changed")
+    assert a2["num"] == 1
+
+
+def test_resolve_and_snooze_by_num(ledger):
+    a = _sample(ledger, source_ref="a")
+    b = _sample(ledger, source_ref="b")
+    assert ledger.get_loop_by_num(b["num"])["id"] == b["id"]
+    ledger.resolve_by_num(a["num"], "done")
+    assert ledger.get_loop(a["id"])["status"] == "done"
+    ledger.snooze_by_num(b["num"], "2026-07-01T00:00:00Z")
+    assert ledger.get_loop(b["id"])["status"] == "snoozed"
+    # Unknown number is a no-op (returns None), not a crash.
+    assert ledger.resolve_by_num(999, "done") is None
+
+
 def test_ordering_by_importance_then_due(ledger):
     _sample(ledger, source_ref="low", importance=1)
     _sample(ledger, source_ref="high", importance=5)

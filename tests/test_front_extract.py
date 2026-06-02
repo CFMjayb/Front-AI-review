@@ -122,11 +122,15 @@ def test_cos_disabled_short_circuits(mods, monkeypatch):
 # ── Reconcile ────────────────────────────────────────────────────────────────
 
 class FakeFront:
-    def __init__(self, messages_by_conv):
+    def __init__(self, messages_by_conv, status_by_conv=None):
         self._m = messages_by_conv
+        self._s = status_by_conv or {}
 
     def get_conversation_messages(self, conv_id, **_):
         return self._m.get(conv_id, [])
+
+    def get_conversation(self, conv_id):
+        return {"id": conv_id, "status": self._s.get(conv_id, "assigned")}
 
 
 def test_reconcile_resolves_i_owe_after_jay_replies(mods):
@@ -147,3 +151,25 @@ def test_reconcile_resolves_owed_to_me_after_they_reply(mods):
                                  _msg(inbound=True, ago_hours=1)]})
     res = fx.reconcile_open_front_loops(front)
     assert res["resolved"] == 1
+
+
+def test_reconcile_resolves_when_archived_in_front(mods):
+    # Action-only loop (no reply): archiving the Front conversation closes it.
+    ledger, fx = mods
+    fx.extract_from_analysis(_conv("cnv_a"), [_msg(inbound=True)], _analysis())
+    assert len(ledger.list_loops()) == 1
+    front = FakeFront({"cnv_a": [_msg(inbound=True)]},
+                      status_by_conv={"cnv_a": "archived"})
+    res = fx.reconcile_open_front_loops(front)
+    assert res["resolved"] == 1
+    assert ledger.list_loops() == []  # resolved → hidden
+
+
+def test_reconcile_keeps_open_when_still_assigned(mods):
+    ledger, fx = mods
+    fx.extract_from_analysis(_conv("cnv_b"), [_msg(inbound=True)], _analysis())
+    front = FakeFront({"cnv_b": [_msg(inbound=True)]},
+                      status_by_conv={"cnv_b": "assigned"})
+    res = fx.reconcile_open_front_loops(front)
+    assert res["resolved"] == 0
+    assert len(ledger.list_loops()) == 1

@@ -103,15 +103,23 @@ def cos_upsert_loop(direction: str, counterparty: str, summary: str, channel: st
 
 
 @mcp.tool()
-def cos_resolve_loop(loop_id: str, status: str) -> dict:
-    """Set a loop's status: done | dropped | open | waiting | snoozed."""
-    return ledger.resolve_loop(loop_id, status) or {}
+def cos_resolve_loop(num: int = 0, status: str = "done", loop_id: str = "") -> dict:
+    """Resolve a loop by its catalog number (#num, as shown in the briefing).
+    status: done | dropped | open | waiting | snoozed. (loop_id is an alternative key.)"""
+    if loop_id:
+        return ledger.resolve_loop(loop_id, status) or {}
+    result = ledger.resolve_by_num(num, status)
+    return result or {"error": f"no loop #{num}"}
 
 
 @mcp.tool()
-def cos_snooze_loop(loop_id: str, until: str) -> dict:
-    """Snooze a loop until an ISO date/timestamp (hidden from briefing until then)."""
-    return ledger.snooze_loop(loop_id, until) or {}
+def cos_snooze_loop(num: int = 0, until: str = "", loop_id: str = "") -> dict:
+    """Snooze a loop by its catalog number (#num) until an ISO date/timestamp
+    (hidden from the briefing until then). (loop_id is an alternative key.)"""
+    if loop_id:
+        return ledger.snooze_loop(loop_id, until) or {}
+    result = ledger.snooze_by_num(num, until)
+    return result or {"error": f"no loop #{num}"}
 
 
 @mcp.tool()

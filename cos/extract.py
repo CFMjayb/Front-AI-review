@@ -128,14 +128,34 @@ def loop_from_thread(thread: dict, analysis: dict, *, dry_run: bool = False) -> 
                               **common)
 
 
-def reconcile(loops: list[dict], fetch_messages, *, dry_run: bool = False) -> dict:
+def reconcile(loops: list[dict], fetch_messages, *, is_done=None,
+              dry_run: bool = False) -> dict:
     """Claude-free pass over existing loops. fetch_messages(source_ref) returns the
-    thread's normalized messages. Resolves loops once the other side has the ball."""
+    thread's normalized messages. Resolves loops once the other side has the ball.
+
+    is_done(source_ref) -> bool is an optional channel-specific "handled" signal
+    (e.g. the Front conversation was archived). When it returns True the loop is
+    resolved to done immediately — this is how action-only loops (approve in the
+    bank portal, pay in BILL) get cleared: you archive the thread after acting.
+    """
     active = [l for l in loops if l["status"] not in ("done", "dropped")]
     resolved = updated = errored = 0
 
     for loop in active:
         ref = loop["source_ref"]
+
+        # Channel-specific "handled" signal (e.g. archived in Front) wins — and lets
+        # us skip the message fetch entirely for already-cleared threads.
+        if is_done is not None:
+            try:
+                if is_done(ref):
+                    if not dry_run:
+                        ledger.resolve_loop(loop["id"], "done")
+                    resolved += 1
+                    continue
+            except Exception as exc:
+                logger.debug(f"reconcile: is_done failed for {ref}: {exc}")
+
         try:
             messages = fetch_messages(ref)
         except Exception as exc:
