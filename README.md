@@ -97,4 +97,12 @@ pipeline. Design: [`docs/chief-of-staff/DESIGN.md`](docs/chief-of-staff/DESIGN.m
   analysis once-per-state via the ledger `seen` table, and upserts `teams` loops.
   `modules/analyze.py:analyze_transcript()` is the write-free analyzer it uses.
 
+**Calendars (done):** `cos/calendars.py`.
+
+- Agent sweeps pull your own + named shared calendars (`COS_CALENDARS`) into an
+  `events` cache; the autonomous briefing reads it. Three uses: the 📅 Today
+  section, meeting-prep loops (channel `calendar`, for meetings you owe an attendee
+  or organize), and conflict detection (overlapping meetings flagged ⚠️).
+- Prep loops expire automatically once the meeting passes.
+
 Next: M2 vault render/reconcile, M6 Zoom, M7 memory/voice.

@@ -52,12 +52,18 @@ def _hours_ago(iso_ts: str) -> float:
 
 def gather() -> dict:
     """Pull the day's sections from the ledger (resolved loops already excluded)."""
+    from cos import calendars
     on_you = [l for l in ledger.list_loops(direction="i_owe") if not _is_active_snooze(l)]
     waiting = [l for l in ledger.list_loops(direction="owed_to_me") if not _is_active_snooze(l)]
     overdue = [l for l in ledger.list_loops(overdue_only=True) if not _is_active_snooze(l)]
-    new_recent = [l for l in (on_you + waiting) if _hours_ago(l.get("first_seen")) <= 24]
+    # "New" counts conversation loops only — calendar prep loops live in Today.
+    new_recent = [l for l in (on_you + waiting)
+                  if l["channel"] != "calendar" and _hours_ago(l.get("first_seen")) <= 24]
+    events = calendars.events_for_day()
     return {"on_you": on_you, "waiting": waiting, "overdue": overdue,
-            "new": new_recent, "stats": ledger.stats()}
+            "new": new_recent, "events": events,
+            "conflicts": sorted(calendars.detect_conflicts(events)),
+            "attached": calendars.attach_loops(events), "stats": ledger.stats()}
 
 
 def _loop_line(loop: dict) -> str:
@@ -69,25 +75,53 @@ def _loop_line(loop: dict) -> str:
     return "".join(bits)
 
 
+def _event_line(ev: dict, *, conflict: bool = False) -> str:
+    if ev.get("is_all_day"):
+        when = "all day"
+    else:
+        start = ev["start_at"][11:16] if len(ev.get("start_at", "")) >= 16 else ""
+        end = ev["end_at"][11:16] if len(ev.get("end_at") or "") >= 16 else ""
+        when = f"{start}–{end}" if end else (start or "—")
+    line = f"- **{when}** {ev.get('subject', '(no title)')}"
+    if ev.get("location"):
+        line += f" _({ev['location']})_"
+    if conflict:
+        line += " ⚠️ overlaps"
+    return line
+
+
 def render(sections: dict, *, date: str = "", headline: str = "", closing: str = "",
            filtered_count: int | None = None) -> tuple[str, str]:
     """Return (subject, markdown_body)."""
     date = date or datetime.date.today().isoformat()
     on_you, waiting = sections["on_you"], sections["waiting"]
+    events = sections.get("events", [])
     subject = (f"☀️ Your day — {date} · {len(on_you)} on you · "
-               f"{len(waiting)} waiting")
+               f"{len(waiting)} waiting · {len(events)} meetings")
 
     lines = [f"# Your day — {date}", ""]
     if headline:
         lines += [headline, ""]
 
-    lines.append(f"## 🔴 On you — you owe a reply ({len(on_you)})")
+    lines.append(f"## 🔴 On you ({len(on_you)})")
     lines += [f"{i}. {_loop_line(l)}" for i, l in enumerate(on_you, 1)] or ["_Nothing on you. Enjoy it._"]
     lines.append("")
 
     lines.append(f"## ⏳ Waiting on others — quiet 36 h+ ({len(waiting)})")
     lines += [f"- {_loop_line(l)}" for l in waiting] or ["_Nothing outstanding._"]
     lines.append("")
+
+    if events:
+        conflicts = set(sections.get("conflicts", []))
+        attached = sections.get("attached", {})
+        lines.append(f"## 📅 Today ({len(events)})")
+        for ev in events:
+            lines.append(_event_line(ev, conflict=ev["id"] in conflicts))
+            for loop in attached.get(ev["id"], []):
+                lines.append(f"    - ↳ prep: you owe **{loop['counterparty']}** — {loop['summary']}")
+        if conflicts:
+            lines.append(f"- ⚠️ {len(conflicts)} meeting(s) overlap — check your schedule.")
+        lines.append("")
 
     if sections["new"]:
         lines.append(f"## 🆕 New since yesterday ({len(sections['new'])})")
@@ -146,6 +180,14 @@ def _deliver(subject: str, body: str, filepath: Path) -> str:
 
 def run_briefing(*, claude=None, filtered_count: int | None = None,
                  deliver: bool = True) -> dict:
+    # Refresh calendar-derived loops from the cached events before assembling.
+    from cos import calendars
+    try:
+        calendars.expire_past_calendar_loops()
+        calendars.sync_prep_loops(calendars.events_for_day())
+    except Exception as exc:
+        logger.warning(f"calendar prep sync failed: {exc}")
+
     sections = gather()
     headline, closing = _narrate(sections, claude)
     date = datetime.date.today().isoformat()

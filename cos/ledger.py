@@ -75,6 +75,22 @@ CREATE TABLE IF NOT EXISTS seen (
   seen_at    TEXT NOT NULL,
   PRIMARY KEY (channel, source_ref)
 );
+
+-- Calendar events cache. Agent sweeps fill this; the autonomous briefing reads it.
+CREATE TABLE IF NOT EXISTS events (
+  id          TEXT PRIMARY KEY,   -- provider event id (or hash fallback)
+  calendar    TEXT NOT NULL,      -- which calendar (owner email / label)
+  subject     TEXT,
+  start_at    TEXT NOT NULL,      -- ISO; all-day → date T00:00:00Z
+  end_at      TEXT,
+  location    TEXT,
+  organizer   TEXT,               -- organizer email
+  attendees   TEXT,               -- JSON list of emails
+  source_link TEXT,
+  is_all_day  INTEGER DEFAULT 0,
+  updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_at);
 """
 
 
@@ -292,3 +308,53 @@ def mark_seen(channel: str, source_ref: str, marker: str) -> None:
             "ON CONFLICT(channel, source_ref) DO UPDATE SET marker=excluded.marker, "
             "seen_at=excluded.seen_at",
             (channel, source_ref, marker, now_iso()))
+
+
+# ── Calendar events cache ────────────────────────────────────────────────────
+
+import json as _json
+
+
+def upsert_event(*, id: str, calendar: str, subject: str = "", start_at: str,
+                 end_at: str = "", location: str = "", organizer: str = "",
+                 attendees: list[str] | None = None, source_link: str = "",
+                 is_all_day: bool = False) -> dict:
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO events (id, calendar, subject, start_at, end_at, location,
+                   organizer, attendees, source_link, is_all_day, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET
+                   calendar=excluded.calendar, subject=excluded.subject,
+                   start_at=excluded.start_at, end_at=excluded.end_at,
+                   location=excluded.location, organizer=excluded.organizer,
+                   attendees=excluded.attendees, source_link=excluded.source_link,
+                   is_all_day=excluded.is_all_day, updated_at=excluded.updated_at""",
+            (id, calendar, subject, start_at, end_at or None, location or None,
+             organizer or None, _json.dumps(attendees or []), source_link or None,
+             1 if is_all_day else 0, now_iso()))
+        row = conn.execute("SELECT * FROM events WHERE id=?", (id,)).fetchone()
+    return _event_row(row)
+
+
+def _event_row(row: Optional[sqlite3.Row]) -> Optional[dict]:
+    if row is None:
+        return None
+    d = dict(row)
+    d["attendees"] = _json.loads(d.get("attendees") or "[]")
+    d["is_all_day"] = bool(d.get("is_all_day"))
+    return d
+
+
+def list_events_between(start_iso: str, end_iso: str) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE start_at >= ? AND start_at < ? ORDER BY start_at",
+            (start_iso, end_iso)).fetchall()
+    return [_event_row(r) for r in rows]
+
+
+def delete_events_before(iso: str) -> int:
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM events WHERE start_at < ?", (iso,))
+        return cur.rowcount

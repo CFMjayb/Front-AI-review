@@ -53,7 +53,7 @@ def test_render_includes_loops_and_links(mods):
     assert "(due 2026-06-04)" in body
     assert "https://app.frontapp.com/open/cnv_1" in body
     assert "18** marketing" in body
-    assert "On you — you owe a reply (2)" in body
+    assert "🔴 On you (2)" in body
 
 
 def test_importance_orders_on_you(mods):

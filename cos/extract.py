@@ -28,6 +28,12 @@ def cos_enabled() -> bool:
     return os.environ.get("COS_ENABLED", "true").lower() == "true"
 
 
+def owner_emails() -> set[str]:
+    """Addresses that are "Jay" — drives inbound/outbound and meeting ownership."""
+    raw = os.environ.get("COS_OWNER_EMAILS", "") or os.environ.get("SENDER_TO", "")
+    return {v.strip().lower() for v in raw.split(",") if v.strip()}
+
+
 def iso(epoch_s) -> str:
     if not epoch_s:
         return ledger.now_iso()

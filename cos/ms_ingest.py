@@ -26,8 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 def _owner_emails() -> set[str]:
-    raw = os.environ.get("COS_OWNER_EMAILS", "") or os.environ.get("SENDER_TO", "")
-    return {v.strip().lower() for v in raw.split(",") if v.strip()}
+    return extract.owner_emails()
 
 
 def _normalize_ms_messages(messages: list[dict], owners: set[str]) -> list[dict]:

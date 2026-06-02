@@ -73,6 +73,38 @@ runs this a few times a day.
   outbound direction). Falls back to `SENDER_TO`.
 - `QUIET_THRESHOLD_HOURS` — silence before an outbound ask becomes `owed_to_me` (36).
 
+## Calendars — agent-driven (`cos/calendars.py`)
+
+Calendars come from the `outlook_calendar_search` MCP tool. An agent sweep pulls
+your own + named shared calendars into the `events` cache; the autonomous briefing
+reads that cache (no MCP at 06:00) for the 📅 Today section, conflict flags, and
+meeting-prep loops.
+
+### Agent procedure
+
+1. **For each calendar** in `cos.calendars.configured_calendars()` (`'self'` plus
+   `COS_CALENDARS`), call `outlook_calendar_search` for today (and a few days out):
+   - own calendar: omit `calendarOwnerEmail`;
+   - a shared one: pass `calendarOwnerEmail=<email>` (or `calendarName`).
+   Use `query: "*"`, `afterDateTime: "today"`, `beforeDateTime: "in 2 days"`.
+2. **Ingest** the raw events (the normalizer handles Graph shapes):
+
+   ```python
+   from cos import calendars
+   calendars.ingest_events(own_events, "self")
+   calendars.ingest_events(bishop_events, "bishop@episcopalmaryland.org")
+   calendars.sync_prep_loops(calendars.events_for_day())   # prep loops for today
+   calendars.expire_past_calendar_loops()                  # close finished ones
+   ```
+
+The briefing also runs `sync_prep_loops` / `expire_past_calendar_loops` itself, so
+it's correct even if the sweep is stale — but a sweep shortly before 06:00 keeps
+the day's events fresh.
+
+### Config
+
+- `COS_CALENDARS` — comma-separated extra calendars (owner emails / names).
+
 ## Future channels
 
 `ingest()` is channel-agnostic. Any agent-fetched source (Zoom action items in M6,
