@@ -17,6 +17,7 @@
 | Briefing delivery | **Daily email at 06:00**, sent to Jay |
 | "Gone quiet" threshold | **36 hours** of silence before an `owed_to_me` loop resurfaces |
 | Counterparty scope | **Everyone**, but spam / marketing / unsolicited mail is segregated out of loops and the briefing |
+| Storage | **Hybrid** — SQLite is the source of truth, rendered to an **Obsidian vault** Jay reads/edits; edits reconcile back |
 
 Out of scope for v1 (revisit later): QuickBooks/finance loops, Gmail, SharePoint/OneDrive document loops.
 
@@ -45,8 +46,11 @@ Two layers, deliberately separated.
                  └───────────────────┬──────────────────────────┘
                                      │ reads / edits
                  ┌───────────────────▼──────────────────────────┐
-                 │  Layer 1: MEMORY — the open-loop ledger       │
-                 │   SQLite: loops, people, profile              │
+                 │  Layer 1: MEMORY (hybrid store)               │
+                 │   SQLite (source of truth): loops, people,    │
+                 │     profile  ── render ──▶ Obsidian vault      │
+                 │   Obsidian vault (you read/edit on phone) ──┐ │
+                 │     reconcile edits back ◀──────────────────┘ │
                  └───────────────────▲──────────────────────────┘
                                      │ writes (upserts)
                  ┌───────────────────┴──────────────────────────┐
@@ -74,7 +78,30 @@ that works *now*, with no new credentials, is:
 This keeps each channel pluggable: adding QuickBooks loops later means teaching the
 ingestion agent one more sweep, not rewriting storage or surfaces.
 
-## 4. Data model (`data/cos.db`, SQLite)
+### Storage: hybrid SQLite + Obsidian vault
+
+SQLite is the **source of truth** for the loop ledger — it gives reliable
+update-in-place, dedupe, and filtered queries. On top of it, code renders a
+**human-readable Obsidian vault** (`vault/`, synced through this repo) so Jay can
+read and edit everything on phone or desktop:
+
+- **Loops** → SQLite is authoritative; code *renders* one markdown note per loop
+  (and grouped index notes) into `vault/loops/`. Each note carries YAML frontmatter
+  (`id`, `direction`, `status`, `due_at`, `snooze_until`). A **reconcile** pass
+  reads the vault back, and any frontmatter Jay changed (e.g. `status: done`,
+  `snooze_until: …`, or a corrected category) is written back into SQLite. SQLite
+  wins on machine-updated fields (last_activity); the vault wins on Jay's manual
+  edits. Conflicts resolved by `last_modified` timestamps.
+- **Memory** (people, priorities, voice, project/meeting notes) → the **vault is
+  authoritative** because it's human-curated. The `people`/`profile` tables are a
+  cache refreshed from the vault on reconcile, for fast briefing lookups.
+
+The vault is plain files under git, so it survives the ephemeral container and Jay
+keeps a local synced copy (Obsidian Git plugin or Obsidian Sync). All vault writes
+go through one renderer module and all reads through one reconciler — the rest of
+the system never parses markdown directly.
+
+## 4. Data model (`data/cos.db`, SQLite — mirrored to `vault/`)
 
 ```sql
 -- One row per open commitment / unanswered thread.
@@ -175,13 +202,16 @@ Add to `scheduler.py`: ingestion sweep every N hours, briefing email daily at 06
 
 - **M1 — Ledger + CoS MCP server (open-loop tracking).** SQLite schema, ledger
   module, MCP tools, idempotent upsert. *Testable on Front today, no new creds.*
-- **M2 — Front loop extraction.** Extend `analyze.py` output → `cos_upsert_loop`,
+- **M2 — Vault render + reconcile.** Renderer writes loop notes (YAML frontmatter)
+  into `vault/loops/`; reconciler reads Jay's edits back into SQLite. One module
+  each; conflict rule = machine fields from DB, manual fields from vault.
+- **M3 — Front loop extraction.** Extend `analyze.py` output → `cos_upsert_loop`,
   with direction logic. Backfill from recent processed conversations.
-- **M3 — Daily briefing assembler** reading the ledger; wire into scheduler.
-- **M4 — Outlook + Teams ingestion** via MCP tools (email/chat sweeps + calendar).
-- **M5 — Zoom ingestion**: meeting transcripts → action items → loops.
-- **M6 — Memory & voice**: people/priorities tables feed briefing ranking and
-  draft tone; fold in the existing corrections feedback loop.
+- **M4 — Daily briefing assembler** reading the ledger; emailed 06:00 via scheduler.
+- **M5 — Outlook + Teams ingestion** via MCP tools (email/chat sweeps + calendar).
+- **M6 — Zoom ingestion**: meeting transcripts → action items → loops.
+- **M7 — Memory & voice**: vault-authored people/priorities/voice notes feed
+  briefing ranking and draft tone; fold in the existing corrections feedback loop.
 
 ## 7. Principles carried over from EDOM
 
