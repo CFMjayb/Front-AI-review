@@ -151,7 +151,9 @@ class FrontClient:
                                   limit: int = 50, max_pages: int = 5) -> list[dict]:
         params: dict[str, Any] = {}
         if status:
-            params["q[statuses][]"] = status
+            # Front has no "open" status — an open conversation is assigned OR
+            # unassigned (vs archived/deleted). Expand so the filter matches reality.
+            params["q[statuses][]"] = ["assigned", "unassigned"] if status == "open" else status
         if since_ms:
             params["q[after]"] = since_ms // 1000
         return _collect_pages(f"/inboxes/{inbox_id}/conversations", self.token,
@@ -164,7 +166,8 @@ class FrontClient:
         if since_ms:
             params["q[after]"] = since_ms // 1000
         if status:
-            params["q[statuses][]"] = status
+            # See list_inbox_conversations: "open" → assigned + unassigned.
+            params["q[statuses][]"] = ["assigned", "unassigned"] if status == "open" else status
         return _collect_pages(f"/teammates/{teammate_id}/conversations", self.token,
                               limit=limit, max_pages=max_pages, params=params)
 

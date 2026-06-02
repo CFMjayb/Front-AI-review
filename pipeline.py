@@ -17,6 +17,10 @@ from modules import analyze, m4_cluster, m8_draft
 
 logger = logging.getLogger(__name__)
 
+# Front has no literal "open" status — an open conversation is assigned OR
+# unassigned (as opposed to archived / deleted / trashed / spam).
+_OPEN_STATUSES = {"open", "assigned", "unassigned"}
+
 REQUIRED_TAGS: list[tuple[str, Optional[str]]] = [
     (PROCESSED_TAG, "blue"),
     *((f"AI/{c}", None) for c in analyze.CATEGORIES),
@@ -73,7 +77,7 @@ def _filter_open(conversations: list[dict]) -> tuple[list[dict], int]:
     active: list[dict] = []
     skipped = 0
     for c in conversations:
-        if (c.get("status") or "open") == "open":
+        if (c.get("status") or "open") in _OPEN_STATUSES:
             active.append(c)
         else:
             skipped += 1
