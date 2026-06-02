@@ -76,11 +76,12 @@ def _loop_line(loop: dict) -> str:
 
 
 def _event_line(ev: dict, *, conflict: bool = False) -> str:
+    from cos import calendars
     if ev.get("is_all_day"):
         when = "all day"
     else:
-        start = ev["start_at"][11:16] if len(ev.get("start_at", "")) >= 16 else ""
-        end = ev["end_at"][11:16] if len(ev.get("end_at") or "") >= 16 else ""
+        start = calendars.local_hhmm(ev.get("start_at", ""))
+        end = calendars.local_hhmm(ev.get("end_at") or "")
         when = f"{start}–{end}" if end else (start or "—")
     line = f"- **{when}** {ev.get('subject', '(no title)')}"
     if ev.get("location"):
@@ -190,7 +191,7 @@ def run_briefing(*, claude=None, filtered_count: int | None = None,
 
     sections = gather()
     headline, closing = _narrate(sections, claude)
-    date = datetime.date.today().isoformat()
+    date = calendars.local_today().isoformat()
     subject, body = render(sections, date=date, headline=headline, closing=closing,
                            filtered_count=filtered_count)
 

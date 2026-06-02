@@ -10,6 +10,7 @@ import pytest
 def mods(tmp_path, monkeypatch):
     monkeypatch.setenv("COS_DB_PATH", str(tmp_path / "cos.db"))
     monkeypatch.setenv("COS_OWNER_EMAILS", "jay@cfmins.org")
+    monkeypatch.setenv("COS_TIMEZONE", "UTC")
     from cos import ledger as ledger_mod
     importlib.reload(ledger_mod)
     ledger_mod.init_db()
@@ -91,7 +92,8 @@ def test_prep_loop_when_you_organize(mods):
                             organizer="jay@cfmins.org", attendees=("a@x.org", "b@y.org"))])
     created = cal.sync_prep_loops(cal.events_for_day())
     assert len(created) == 1
-    assert created[0]["summary"].startswith("Prep for: Planning")
+    assert created[0]["counterparty"] == "Planning"
+    assert "Meeting prep" in created[0]["summary"]
 
 
 def test_no_prep_loop_for_solo_meeting_you_dont_owe(mods):
@@ -118,4 +120,18 @@ def test_briefing_today_section(mods):
     assert "1 meetings" in subject
     assert "📅 Today (1)" in body
     assert "Staff meeting" in body
-    assert "10:00–11:00" in body
+    assert "10:00–11:00" in body  # UTC in tests
+
+
+def test_millisecond_timestamps_parse(mods):
+    _, cal, _ = mods
+    ev = cal.event_from_outlook(_raw("Mtg", "2026-06-02T17:00:00.000Z", "2026-06-02T18:00:00.000Z"))
+    assert ev["start_at"] == "2026-06-02T17:00:00Z"  # fractional seconds stripped
+    assert cal._to_epoch(ev["start_at"]) > 0
+
+
+def test_local_time_conversion(mods, monkeypatch):
+    _, cal, _ = mods
+    monkeypatch.setenv("COS_TIMEZONE", "America/New_York")
+    # 14:00 UTC is 10:00 in New York (EDT, summer)
+    assert cal.local_hhmm("2026-06-02T14:00:00Z") == "10:00"

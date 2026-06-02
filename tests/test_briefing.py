@@ -7,6 +7,7 @@ import pytest
 @pytest.fixture()
 def mods(tmp_path, monkeypatch):
     monkeypatch.setenv("COS_DB_PATH", str(tmp_path / "cos.db"))
+    monkeypatch.setenv("COS_TIMEZONE", "UTC")
     from cos import ledger as ledger_mod
     importlib.reload(ledger_mod)
     ledger_mod.init_db()

@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import time
+import zoneinfo
 
 from cos import extract, ledger
 
@@ -27,6 +28,29 @@ logger = logging.getLogger(__name__)
 def configured_calendars() -> list[str]:
     extra = [c.strip() for c in os.environ.get("COS_CALENDARS", "").split(",") if c.strip()]
     return ["self"] + extra
+
+
+# ── Timezone (calendars come back in UTC; display + day bounds are local) ─────
+
+def _tz() -> datetime.tzinfo:
+    try:
+        return zoneinfo.ZoneInfo(os.environ.get("COS_TIMEZONE", "America/New_York"))
+    except Exception:
+        return datetime.timezone.utc
+
+
+def _utc_dt(iso: str) -> datetime.datetime | None:
+    epoch = _to_epoch(iso)
+    return datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc) if epoch else None
+
+
+def local_hhmm(iso: str) -> str:
+    dt = _utc_dt(iso)
+    return dt.astimezone(_tz()).strftime("%H:%M") if dt else (iso[11:16] if len(iso) >= 16 else "")
+
+
+def local_today() -> datetime.date:
+    return datetime.datetime.now(_tz()).date()
 
 
 # ── Normalization (Microsoft Graph / MCP event shapes) ───────────────────────
@@ -58,6 +82,7 @@ def _norm_iso(s: str) -> str:
         return ""
     if len(s) == 10:  # date only → all-day start
         return s + "T00:00:00Z"
+    s = re.sub(r"\.\d+", "", s)  # drop fractional seconds (Graph sends .000)
     if s.endswith("Z") or re.search(r"[+-]\d\d:?\d\d$", s):
         return s
     return s + "Z"
@@ -106,9 +131,12 @@ def ingest_events(raw_events: list[dict], calendar_label: str = "self") -> int:
 # ── Reads / derived views ────────────────────────────────────────────────────
 
 def events_for_day(day: datetime.date | None = None) -> list[dict]:
-    day = day or datetime.date.today()
-    start = f"{day.isoformat()}T00:00:00Z"
-    end = f"{(day + datetime.timedelta(days=1)).isoformat()}T00:00:00Z"
+    tz = _tz()
+    day = day or datetime.datetime.now(tz).date()
+    start_local = datetime.datetime(day.year, day.month, day.day, tzinfo=tz)
+    end_local = start_local + datetime.timedelta(days=1)
+    start = start_local.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = end_local.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return ledger.list_events_between(start, end)
 
 
@@ -167,20 +195,21 @@ def sync_prep_loops(events: list[dict], *, owner_emails: set[str] | None = None,
         if not (owe or organizer_is_me):
             continue
 
-        summary = f"Prep for: {ev['subject']}"
+        summary = "Meeting prep"
         if owe:
             who = ", ".join(sorted({l["counterparty"] for l in owe}))
             summary += f" — you owe {who}"
         importance = 4 if start_e and (start_e - now) <= 3 * 3600 else 3
 
         if dry_run:
-            created.append({"dry_run": True, "summary": summary, "source_ref": ev["id"]})
+            created.append({"dry_run": True, "summary": summary, "source_ref": ev["id"],
+                            "counterparty": ev["subject"]})
             continue
         created.append(ledger.upsert_loop(
-            direction="i_owe", counterparty=ev.get("organizer") or "meeting",
-            counterparty_email=ev.get("organizer") or "", summary=summary,
-            channel="calendar", source_ref=ev["id"], source_link=ev.get("source_link") or "",
-            due_at=ev["start_at"], importance=importance, status="open"))
+            direction="i_owe", counterparty=ev["subject"], counterparty_email="",
+            summary=summary, channel="calendar", source_ref=ev["id"],
+            source_link=ev.get("source_link") or "", due_at=ev["start_at"],
+            importance=importance, status="open"))
     return created
 
 
