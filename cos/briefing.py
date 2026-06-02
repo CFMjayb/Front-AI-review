@@ -129,14 +129,19 @@ def _narrate(sections: dict, claude) -> tuple[str, str]:
 
 
 def _deliver(subject: str, body: str, filepath: Path) -> str:
-    """Pluggable delivery. Default 'file' just persists. 'email' transports are wired
-    once a sending channel is chosen (Front / Outlook / SMTP)."""
+    """Deliver via the reusable sender layer. Default 'file' only persists; set
+    BRIEFING_DELIVERY=email to send (transport chosen by SENDER_TRANSPORT)."""
     mode = os.environ.get("BRIEFING_DELIVERY", "file").lower()
     if mode == "file":
         return "file"
-    logger.warning("BRIEFING_DELIVERY=%s requested but no email transport is "
-                   "configured yet — brief saved to %s only.", mode, filepath)
-    return "file"
+    try:
+        from cos import sender
+        result = sender.send(subject=subject, body_md=body)
+        return result.get("transport", "email")
+    except Exception as exc:
+        logger.error("Briefing delivery failed (%s) — brief saved to %s only.",
+                     exc, filepath)
+        return "file"
 
 
 def run_briefing(*, claude=None, filtered_count: int | None = None,

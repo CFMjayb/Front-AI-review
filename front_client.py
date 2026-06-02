@@ -289,6 +289,22 @@ class FrontClient:
         data, _ = _request("POST", path, self.token, body=payload)
         return data
 
+    def send_message(self, channel_id: str, *, to: list[str], subject: str, body: str,
+                     text: Optional[str] = None, author_id: Optional[str] = None) -> dict:
+        """Send an outbound email from a channel (creates + sends, not a draft).
+
+        body is HTML; pass text for the plain-text alternative. Used by the
+        Chief-of-Staff sender layer for self-addressed briefings/notifications.
+        """
+        payload: dict[str, Any] = {"to": to, "subject": subject, "body": body,
+                                   "options": {"archive": True}}
+        if text:
+            payload["text"] = text
+        if author_id:
+            payload["author_id"] = author_id
+        data, _ = _request("POST", f"/channels/{channel_id}/messages", self.token, body=payload)
+        return data
+
     # ── Helpers ─────────────────────────────────────────────────────────────
 
     @staticmethod

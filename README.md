@@ -74,7 +74,15 @@ pipeline. Design: [`docs/chief-of-staff/DESIGN.md`](docs/chief-of-staff/DESIGN.m
   warm headline + closing. Snoozed/resolved loops are excluded; `i_owe` ordered by
   importance then due date.
 - Scheduled daily at 06:00 in `scheduler.py`; output saved to `data/briefings/`.
-- Delivery transport (Front / Outlook / SMTP) is pluggable via `BRIEFING_DELIVERY`;
-  default `file` persists the brief until a sending channel is chosen.
+- Delivery goes through the shared sender layer (below); `BRIEFING_DELIVERY=email`
+  sends, default `file` just persists.
 
-Next: choose briefing email transport, M2 vault render/reconcile, M5 Outlook/Teams, M6 Zoom.
+**Sender layer (done):** one reusable send path for all outbound email.
+
+- `cos/sender.py` — `send(subject, body_md, to, transport)` with pluggable
+  transports. **Front** is wired now (`send_message` on a channel); Outlook and
+  SMTP register behind the same interface via `register_transport()`. Includes a
+  markdown→HTML converter so briefings, nudges, and future emails all render well.
+- Config: `SENDER_TRANSPORT` (front), `SENDER_TO`, `SENDER_FRONT_CHANNEL_ID`.
+
+Next: M2 vault render/reconcile, M5 Outlook/Teams, M6 Zoom, M7 memory/voice.
