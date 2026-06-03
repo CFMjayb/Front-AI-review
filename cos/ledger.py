@@ -36,6 +36,9 @@ resolve_by_num = _b.resolve_by_num
 snooze_by_num = _b.snooze_by_num
 stats = _b.stats
 
+# Learning / feedback
+list_feedback = _b.list_feedback
+
 # People & memory
 people_upsert = _b.people_upsert
 list_people = _b.list_people

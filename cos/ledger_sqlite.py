@@ -92,6 +92,28 @@ CREATE TABLE IF NOT EXISTS events (
   updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_at);
+
+-- Resolution feedback log — one row per resolve/snooze/drop. The learning
+-- substrate: how Jay triages (what he drops as noise, what he acts on fast vs
+-- defers) feeds noise-filtering + importance ranking over time.
+CREATE TABLE IF NOT EXISTS feedback (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts                 TEXT NOT NULL,
+  action             TEXT NOT NULL,   -- done | dropped | snoozed
+  loop_id            TEXT,
+  num                INTEGER,
+  direction          TEXT,
+  channel            TEXT,
+  category           TEXT,
+  counterparty       TEXT,
+  counterparty_email TEXT,
+  importance         INTEGER,
+  due_at             TEXT,
+  age_hours          REAL,            -- first_seen -> resolution
+  snooze_until       TEXT,
+  reason             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_action ON feedback(action);
 """
 
 
@@ -217,16 +239,16 @@ def get_loop_by_num(num: int) -> Optional[dict]:
     return _row_to_dict(row)
 
 
-def resolve_by_num(num: int, status: str) -> Optional[dict]:
+def resolve_by_num(num: int, status: str, *, reason: str = "") -> Optional[dict]:
     """Resolve a loop by catalog number. Returns None if the number is unknown."""
     loop = get_loop_by_num(num)
-    return resolve_loop(loop["id"], status) if loop else None
+    return resolve_loop(loop["id"], status, reason=reason) if loop else None
 
 
-def snooze_by_num(num: int, until: str) -> Optional[dict]:
+def snooze_by_num(num: int, until: str, *, reason: str = "") -> Optional[dict]:
     """Snooze a loop by catalog number. Returns None if the number is unknown."""
     loop = get_loop_by_num(num)
-    return snooze_loop(loop["id"], until) if loop else None
+    return snooze_loop(loop["id"], until, reason=reason) if loop else None
 
 
 def list_loops(*, direction: str = "", channel: str = "", status: str = "",
@@ -255,21 +277,66 @@ def list_loops(*, direction: str = "", channel: str = "", status: str = "",
     return [dict(r) for r in rows]
 
 
-def resolve_loop(loop_id_: str, status: str) -> Optional[dict]:
+def _age_hours(first_seen: Optional[str]) -> Optional[float]:
+    if not first_seen:
+        return None
+    try:
+        dt = datetime.datetime.strptime(first_seen, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc)
+        return round((datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds() / 3600, 2)
+    except ValueError:
+        return None
+
+
+def _record_feedback(conn, loop: dict, action: str, *, reason: str = "",
+                     snooze_until: str = "") -> None:
+    if not loop:
+        return
+    conn.execute(
+        """INSERT INTO feedback (ts, action, loop_id, num, direction, channel, category,
+               counterparty, counterparty_email, importance, due_at, age_hours,
+               snooze_until, reason)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (now_iso(), action, loop.get("id"), loop.get("num"), loop.get("direction"),
+         loop.get("channel"), loop.get("category"), loop.get("counterparty"),
+         loop.get("counterparty_email"), loop.get("importance"), loop.get("due_at"),
+         _age_hours(loop.get("first_seen")), snooze_until or None, reason or None))
+
+
+def list_feedback(action: str = "", since: str = "", limit: int = 1000) -> list[dict]:
+    clauses: list[str] = []
+    params: list = []
+    if action:
+        clauses.append("action = ?"); params.append(action)
+    if since:
+        clauses.append("ts >= ?"); params.append(since)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM feedback{where} ORDER BY ts DESC LIMIT ?",
+            params + [limit]).fetchall()
+    return [dict(r) for r in rows]
+
+
+def resolve_loop(loop_id_: str, status: str, *, reason: str = "") -> Optional[dict]:
     if status not in VALID_STATUSES:
         raise ValueError(f"invalid status: {status!r}")
     with _connect() as conn:
         conn.execute("UPDATE loops SET status=?, last_reviewed=? WHERE id=?",
                      (status, now_iso(), loop_id_))
         row = conn.execute("SELECT * FROM loops WHERE id = ?", (loop_id_,)).fetchone()
+        if row is not None and status in ("done", "dropped"):
+            _record_feedback(conn, dict(row), status, reason=reason)
     return _row_to_dict(row)
 
 
-def snooze_loop(loop_id_: str, until: str) -> Optional[dict]:
+def snooze_loop(loop_id_: str, until: str, *, reason: str = "") -> Optional[dict]:
     with _connect() as conn:
         conn.execute("UPDATE loops SET status='snoozed', snooze_until=?, last_reviewed=? "
                      "WHERE id=?", (until, now_iso(), loop_id_))
         row = conn.execute("SELECT * FROM loops WHERE id = ?", (loop_id_,)).fetchone()
+        if row is not None:
+            _record_feedback(conn, dict(row), "snoozed", reason=reason, snooze_until=until)
     return _row_to_dict(row)
 
 
