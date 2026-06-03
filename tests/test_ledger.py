@@ -106,6 +106,27 @@ def test_resolve_and_snooze_by_num(ledger):
     assert ledger.resolve_by_num(999, "done") is None
 
 
+def test_resolution_writes_feedback_log(ledger):
+    a = _sample(ledger, source_ref="a", category="finance", importance=4)
+    b = _sample(ledger, source_ref="b", category="admin")
+    ledger.resolve_by_num(a["num"], "dropped", reason="noise")
+    ledger.snooze_by_num(b["num"], "2026-07-01T00:00:00Z")
+
+    fb = ledger.list_feedback()
+    assert len(fb) == 2
+    dropped = next(f for f in fb if f["action"] == "dropped")
+    assert dropped["num"] == a["num"] and dropped["category"] == "finance"
+    assert dropped["importance"] == 4 and dropped["reason"] == "noise"
+    assert dropped["age_hours"] is not None
+    snoozed = next(f for f in fb if f["action"] == "snoozed")
+    assert snoozed["snooze_until"] == "2026-07-01T00:00:00Z"
+
+    # Filter by action; reopening (status->open) is NOT logged as feedback.
+    assert len(ledger.list_feedback(action="dropped")) == 1
+    ledger.resolve_loop(a["id"], "open")
+    assert len(ledger.list_feedback()) == 2
+
+
 def test_ordering_by_importance_then_due(ledger):
     _sample(ledger, source_ref="low", importance=1)
     _sample(ledger, source_ref="high", importance=5)

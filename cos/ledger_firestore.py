@@ -29,6 +29,7 @@ _PEOPLE = "people"
 _MEMORY = "memory"
 _SEEN = "seen"
 _EVENTS = "events"
+_FEEDBACK = "feedback"
 _COUNTERS = "_counters"
 
 _client: Optional[firestore.Client] = None
@@ -125,14 +126,52 @@ def get_loop_by_num(num: int) -> Optional[dict]:
     return _loop_doc(docs[0]) if docs else None
 
 
-def resolve_by_num(num: int, status: str) -> Optional[dict]:
+def resolve_by_num(num: int, status: str, *, reason: str = "") -> Optional[dict]:
     loop = get_loop_by_num(num)
-    return resolve_loop(loop["id"], status) if loop else None
+    return resolve_loop(loop["id"], status, reason=reason) if loop else None
 
 
-def snooze_by_num(num: int, until: str) -> Optional[dict]:
+def snooze_by_num(num: int, until: str, *, reason: str = "") -> Optional[dict]:
     loop = get_loop_by_num(num)
-    return snooze_loop(loop["id"], until) if loop else None
+    return snooze_loop(loop["id"], until, reason=reason) if loop else None
+
+
+def _age_hours(first_seen: Optional[str]) -> Optional[float]:
+    if not first_seen:
+        return None
+    try:
+        dt = datetime.datetime.strptime(first_seen, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc)
+        return round((datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds() / 3600, 2)
+    except ValueError:
+        return None
+
+
+def _record_feedback(loop: dict, action: str, *, reason: str = "",
+                     snooze_until: str = "") -> None:
+    if not loop:
+        return
+    _db().collection(_FEEDBACK).add({
+        "ts": now_iso(), "action": action, "loop_id": loop.get("id"),
+        "num": loop.get("num"), "direction": loop.get("direction"),
+        "channel": loop.get("channel"), "category": loop.get("category"),
+        "counterparty": loop.get("counterparty"),
+        "counterparty_email": loop.get("counterparty_email"),
+        "importance": loop.get("importance"), "due_at": loop.get("due_at"),
+        "age_hours": _age_hours(loop.get("first_seen")),
+        "snooze_until": snooze_until or None, "reason": reason or None,
+    })
+
+
+def list_feedback(action: str = "", since: str = "", limit: int = 1000) -> list[dict]:
+    q = _db().collection(_FEEDBACK)
+    if action:
+        q = q.where(filter=FieldFilter("action", "==", action))
+    if since:
+        q = q.where(filter=FieldFilter("ts", ">=", since))
+    docs = [s.to_dict() for s in q.stream()]
+    docs.sort(key=lambda d: d.get("ts") or "", reverse=True)
+    return docs[:limit]
 
 
 def _order_key(loop: dict):
@@ -162,21 +201,28 @@ def list_loops(*, direction: str = "", channel: str = "", status: str = "",
     return loops
 
 
-def resolve_loop(loop_id_: str, status: str) -> Optional[dict]:
+def resolve_loop(loop_id_: str, status: str, *, reason: str = "") -> Optional[dict]:
     if status not in VALID_STATUSES:
         raise ValueError(f"invalid status: {status!r}")
     ref = _db().collection(_LOOPS).document(loop_id_)
-    if not ref.get().exists:
+    snap = ref.get()
+    if not snap.exists:
         return None
+    loop = _loop_doc(snap)
     ref.update({"status": status, "last_reviewed": now_iso()})
+    if status in ("done", "dropped"):
+        _record_feedback(loop, status, reason=reason)
     return _loop_doc(ref.get())
 
 
-def snooze_loop(loop_id_: str, until: str) -> Optional[dict]:
+def snooze_loop(loop_id_: str, until: str, *, reason: str = "") -> Optional[dict]:
     ref = _db().collection(_LOOPS).document(loop_id_)
-    if not ref.get().exists:
+    snap = ref.get()
+    if not snap.exists:
         return None
+    loop = _loop_doc(snap)
     ref.update({"status": "snoozed", "snooze_until": until, "last_reviewed": now_iso()})
+    _record_feedback(loop, "snoozed", reason=reason, snooze_until=until)
     return _loop_doc(ref.get())
 
 
