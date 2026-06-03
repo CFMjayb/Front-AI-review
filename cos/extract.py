@@ -72,6 +72,20 @@ def _summary_from(analysis: dict) -> str:
     return _trim(summary or "(no summary)")
 
 
+def is_fyi(analysis: dict) -> bool:
+    """Informational/notification, not a real action: a newsletter, a 'cc'd' courtesy
+    note, a routine receipt. Goes to the brief's FYI section and auto-clears in 24h.
+
+    True when the AI flags it 'FYI', OR when nothing is actually required of Jay
+    (no reply/approval/payment) and it's low urgency."""
+    summary = (analysis.get("action_summary") or "").strip().lower()
+    if summary.startswith("fyi"):
+        return True
+    hard = (analysis.get("requires_reply") or analysis.get("requires_approval")
+            or analysis.get("requires_payment"))
+    return (not hard) and analysis.get("urgency") == "low"
+
+
 def loop_from_thread(thread: dict, analysis: dict, *, dry_run: bool = False) -> dict | None:
     """Decide whether a normalized thread is an open loop and upsert it."""
     if not cos_enabled() or not analysis:
@@ -93,7 +107,7 @@ def loop_from_thread(thread: dict, analysis: dict, *, dry_run: bool = False) -> 
     common = dict(
         summary=_summary_from(analysis), channel=channel, source_ref=source_ref,
         source_link=thread.get("source_link", ""), category=analysis.get("category") or "",
-        importance=importance, confidence=confidence,
+        importance=importance, confidence=confidence, fyi=is_fyi(analysis),
         due_at=analysis.get("deadline") or "", last_activity=last_iso,
     )
 
@@ -126,6 +140,30 @@ def loop_from_thread(thread: dict, analysis: dict, *, dry_run: bool = False) -> 
     return ledger.upsert_loop(direction=direction, counterparty=counterparty,
                               counterparty_email=counterparty_email, status=status,
                               **common)
+
+
+def expire_fyi_loops(*, max_age_hours: float = 24.0, dry_run: bool = False) -> int:
+    """Auto-clear FYI/notification loops not acted on within max_age_hours. Acting on
+    one (reply/archive) already resolves it via reconcile; this drops the rest so the
+    FYI section stays a rolling 24h window, not an ever-growing pile."""
+    import calendar
+    expired = 0
+    for loop in ledger.list_loops():  # open/waiting/snoozed only (done/dropped hidden)
+        if not loop.get("fyi") or loop.get("status") != "open":
+            continue
+        fs = loop.get("first_seen")
+        try:
+            age_h = (time.time() - calendar.timegm(
+                time.strptime(fs, "%Y-%m-%dT%H:%M:%SZ"))) / 3600 if fs else 0.0
+        except ValueError:
+            age_h = 0.0
+        if age_h >= max_age_hours:
+            if not dry_run:
+                ledger.resolve_loop(loop["id"], "dropped", reason="fyi auto-expire 24h")
+            expired += 1
+    if expired:
+        logger.info(f"FYI auto-expire: cleared {expired} loop(s) older than {max_age_hours}h")
+    return expired
 
 
 def reconcile(loops: list[dict], fetch_messages, *, is_done=None,

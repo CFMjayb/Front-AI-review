@@ -53,14 +53,17 @@ def _hours_ago(iso_ts: str) -> float:
 def gather() -> dict:
     """Pull the day's sections from the ledger (resolved loops already excluded)."""
     from cos import calendars
-    on_you = [l for l in ledger.list_loops(direction="i_owe") if not _is_active_snooze(l)]
+    i_owe = [l for l in ledger.list_loops(direction="i_owe") if not _is_active_snooze(l)]
+    on_you = [l for l in i_owe if not l.get("fyi")]          # real action items
+    fyi = [l for l in i_owe if l.get("fyi")]                 # informational — own section
     waiting = [l for l in ledger.list_loops(direction="owed_to_me") if not _is_active_snooze(l)]
-    overdue = [l for l in ledger.list_loops(overdue_only=True) if not _is_active_snooze(l)]
-    # "New" counts conversation loops only — calendar prep loops live in Today.
+    overdue = [l for l in ledger.list_loops(overdue_only=True)
+               if not _is_active_snooze(l) and not l.get("fyi")]
+    # "New" counts real conversation loops only — FYI + calendar prep excluded.
     new_recent = [l for l in (on_you + waiting)
                   if l["channel"] != "calendar" and _hours_ago(l.get("first_seen")) <= 24]
     events = calendars.events_for_day()
-    return {"on_you": on_you, "waiting": waiting, "overdue": overdue,
+    return {"on_you": on_you, "fyi": fyi, "waiting": waiting, "overdue": overdue,
             "new": new_recent, "events": events,
             "conflicts": sorted(calendars.detect_conflicts(events)),
             "attached": calendars.attach_loops(events), "stats": ledger.stats()}
@@ -131,6 +134,14 @@ def render(sections: dict, *, date: str = "", headline: str = "", closing: str =
         lines += [f"- {_loop_line(l)}" for l in sections["new"]]
         lines.append("")
 
+    fyi = sections.get("fyi", [])
+    if fyi:
+        lines.append(f"## 📋 FYI — auto-clears in 24h ({len(fyi)})")
+        lines.append("_Notifications / cc's / newsletters. Act on any you care about; "
+                     "the rest clear automatically._")
+        lines += [f"- {_loop_line(l)}" for l in fyi]
+        lines.append("")
+
     if filtered_count is not None:
         lines += [f"## 🗑️ Filtered", "",
                   f"**{filtered_count}** marketing / spam / unsolicited set aside.", ""]
@@ -184,12 +195,16 @@ def _deliver(subject: str, body: str, filepath: Path) -> str:
 def run_briefing(*, claude=None, filtered_count: int | None = None,
                  deliver: bool = True) -> dict:
     # Refresh calendar-derived loops from the cached events before assembling.
-    from cos import calendars
+    from cos import calendars, extract
     try:
         calendars.expire_past_calendar_loops()
         calendars.sync_prep_loops(calendars.events_for_day())
     except Exception as exc:
         logger.warning(f"calendar prep sync failed: {exc}")
+    try:
+        extract.expire_fyi_loops()  # drop FYI items not acted on within 24h
+    except Exception as exc:
+        logger.warning(f"FYI auto-expire failed: {exc}")
 
     sections = gather()
     headline, closing = _narrate(sections, claude)

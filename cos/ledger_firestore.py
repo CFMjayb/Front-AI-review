@@ -69,7 +69,8 @@ def _loop_doc(snap) -> Optional[dict]:
 def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str,
                 source_ref: str, source_link: str = "", counterparty_email: str = "",
                 category: str = "", importance: int = 3, confidence: float = 0.0,
-                due_at: str = "", status: str = "", last_activity: str = "") -> dict:
+                due_at: str = "", status: str = "", last_activity: str = "",
+                fyi: bool = False) -> dict:
     if direction not in VALID_DIRECTIONS:
         raise ValueError(f"invalid direction: {direction!r}")
     if status and status not in VALID_STATUSES:
@@ -93,10 +94,10 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
                 "num": num, "direction": direction, "counterparty": counterparty,
                 "counterparty_email": counterparty_email, "summary": summary,
                 "channel": channel, "source_ref": source_ref, "source_link": source_link,
-                "category": category, "status": status or "open", "importance": importance,
-                "confidence": confidence, "due_at": due_at or None, "snooze_until": None,
-                "first_seen": now, "last_activity": last_activity, "last_reviewed": now,
-                "notes": None,
+                "category": category, "fyi": bool(fyi), "status": status or "open",
+                "importance": importance, "confidence": confidence, "due_at": due_at or None,
+                "snooze_until": None, "first_seen": now, "last_activity": last_activity,
+                "last_reviewed": now, "notes": None,
             })
         else:
             ex = snap.to_dict()
@@ -106,8 +107,8 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
                 "counterparty": counterparty,
                 "counterparty_email": counterparty_email or ex.get("counterparty_email"),
                 "summary": summary, "source_link": source_link or ex.get("source_link"),
-                "category": category or ex.get("category"), "status": new_status,
-                "importance": importance, "confidence": confidence,
+                "category": category or ex.get("category"), "fyi": bool(fyi),
+                "status": new_status, "importance": importance, "confidence": confidence,
                 "due_at": due_at or ex.get("due_at"), "last_activity": last_activity,
                 "last_reviewed": now,
             })
