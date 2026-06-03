@@ -43,6 +43,22 @@ _SYSTEM_LOCALPART = re.compile(
     r"^(?:mailer-daemon|postmaster|bounce[sd]?|.*-bounces?)$", re.I
 )
 
+# Calendar meeting-response auto-notifications (Outlook/O365 subject format).
+# "Accepted: <meeting>", "Declined: …", "Tentative: …" — informational, never a loop.
+_CAL_RESPONSE = re.compile(
+    r"^\s*(?:accepted|declined|tentative|tentatively accepted|"
+    r"new time proposed|declined with comments)\s*:",
+    re.I,
+)
+
+
+def is_calendar_response(conv: dict) -> bool:
+    """True for a calendar meeting-response notification (Accepted/Declined/Tentative).
+    These are auto-generated and need no AI review or loop."""
+    if os.environ.get("SPAM_PREFILTER", "true").lower() != "true":
+        return False
+    return bool(_CAL_RESPONSE.match(conv.get("subject") or ""))
+
 
 def _sender(msg: dict) -> str:
     author = msg.get("author") or {}

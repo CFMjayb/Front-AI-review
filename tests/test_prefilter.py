@@ -72,3 +72,24 @@ def test_disabled_via_env(monkeypatch):
     msgs = [_msg(email="news@mcsv.net", text="appeal")]
     is_bulk, reason = looks_like_bulk(_conv(), msgs)
     assert not is_bulk and reason is None
+
+
+# ── Calendar meeting-response notifications ──────────────────────────────────
+
+from modules.prefilter import is_calendar_response
+
+
+def test_calendar_responses_are_detected():
+    for prefix in ("Accepted", "Declined", "Tentative", "Tentatively accepted",
+                   "New time proposed"):
+        assert is_calendar_response(_conv(subject=f"{prefix}: Finance Sync Jun 5"))
+
+
+def test_normal_subject_is_not_a_calendar_response():
+    assert not is_calendar_response(_conv(subject="Re: Finance Sync agenda"))
+    assert not is_calendar_response(_conv(subject="Payment accepted: invoice 1023"))
+
+
+def test_calendar_response_respects_disable_flag(monkeypatch):
+    monkeypatch.setenv("SPAM_PREFILTER", "false")
+    assert not is_calendar_response(_conv(subject="Declined: Budget review"))
