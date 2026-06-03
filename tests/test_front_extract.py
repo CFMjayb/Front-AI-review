@@ -1,5 +1,6 @@
 """Tests for M3 Front loop extraction (direction logic + reconcile)."""
 import importlib
+import os
 import time
 
 import pytest
@@ -173,3 +174,42 @@ def test_reconcile_keeps_open_when_still_assigned(mods):
     res = fx.reconcile_open_front_loops(front)
     assert res["resolved"] == 0
     assert len(ledger.list_loops()) == 1
+
+
+# ── FYI handling ─────────────────────────────────────────────────────────────
+
+def _fyi_analysis():
+    return _analysis(action_summary="FYI only — monthly HR newsletter",
+                     requires_reply=False, requires_approval=False, requires_payment=False,
+                     open_questions=[], action_items=["archive"])
+
+
+def test_fyi_analysis_flags_loop(mods):
+    ledger, fx = mods
+    loop = fx.extract_from_analysis(_conv("cnv_fyi"), [_msg(inbound=True)], _fyi_analysis())
+    assert loop is not None and loop["fyi"] == 1
+
+
+def test_real_action_loop_is_not_fyi(mods):
+    ledger, fx = mods
+    loop = fx.extract_from_analysis(_conv("cnv_act"), [_msg(inbound=True)], _analysis())
+    assert loop["fyi"] == 0
+
+
+def test_expire_fyi_drops_old_but_keeps_fresh(mods):
+    import datetime
+    import sqlite3
+    ledger, fx = mods
+    from cos import extract
+    old = fx.extract_from_analysis(_conv("cnv_old"), [_msg(inbound=True)], _fyi_analysis())
+    fresh = fx.extract_from_analysis(_conv("cnv_new"), [_msg(inbound=True)], _fyi_analysis())
+    # backdate one FYI loop's first_seen to 25h ago
+    stamp = (datetime.datetime.now(datetime.timezone.utc)
+             - datetime.timedelta(hours=25)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    con = sqlite3.connect(os.environ["COS_DB_PATH"])
+    con.execute("UPDATE loops SET first_seen=? WHERE id=?", (stamp, old["id"]))
+    con.commit(); con.close()
+
+    assert extract.expire_fyi_loops() == 1
+    assert ledger.get_loop(old["id"])["status"] == "dropped"
+    assert ledger.get_loop(fresh["id"])["status"] == "open"  # under 24h, untouched

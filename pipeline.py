@@ -265,6 +265,13 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
     except Exception as exc:
         logger.warning(f"Loop reconcile failed: {exc}")
 
+    # Auto-clear FYI/notification loops not acted on within 24h.
+    try:
+        from cos import extract as cos_extract
+        cos_extract.expire_fyi_loops(dry_run=dry_run)
+    except Exception as exc:
+        logger.warning(f"FYI auto-expire failed: {exc}")
+
     prefiltered = sum(1 for r in results if r.get("prefiltered"))
     analyzed = sum(1 for r in results if not r["errored"] and not r.get("prefiltered"))
     logger.info(f"Pipeline complete: analyzed={analyzed} prefiltered(spam, no AI)={prefiltered} "

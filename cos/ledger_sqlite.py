@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS loops (
   source_ref    TEXT NOT NULL,
   source_link   TEXT,
   category      TEXT,
+  fyi           INTEGER DEFAULT 0,   -- informational/notification; separate brief section, auto-clears 24h
   status        TEXT NOT NULL DEFAULT 'open',
   importance    INTEGER DEFAULT 3,
   confidence    REAL,
@@ -139,6 +140,10 @@ def _migrate(conn) -> None:
         rows = conn.execute("SELECT id FROM loops ORDER BY first_seen ASC, rowid ASC").fetchall()
         for i, r in enumerate(rows, 1):
             conn.execute("UPDATE loops SET num=? WHERE id=?", (i, r[0]))
+    if "fyi" not in cols:
+        conn.execute("ALTER TABLE loops ADD COLUMN fyi INTEGER DEFAULT 0")
+        # Backfill: existing loops whose summary reads "FYI ..." are informational.
+        conn.execute("UPDATE loops SET fyi=1 WHERE summary LIKE 'FYI%'")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_loops_num ON loops(num)")
 
 
@@ -176,7 +181,8 @@ def _row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict]:
 def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str,
                 source_ref: str, source_link: str = "", counterparty_email: str = "",
                 category: str = "", importance: int = 3, confidence: float = 0.0,
-                due_at: str = "", status: str = "", last_activity: str = "") -> dict:
+                due_at: str = "", status: str = "", last_activity: str = "",
+                fyi: bool = False) -> dict:
     """Insert a loop or merge into the existing one. Returns the stored row.
 
     Merge rules: first_seen and a manually-set status (done/dropped/snoozed) are
@@ -197,13 +203,14 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
         if existing is None:
             conn.execute(
                 """INSERT INTO loops (id, num, direction, counterparty, counterparty_email,
-                       summary, channel, source_ref, source_link, category, status,
+                       summary, channel, source_ref, source_link, category, fyi, status,
                        importance, confidence, due_at, first_seen, last_activity,
                        last_reviewed)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (lid, _next_num(conn), direction, counterparty, counterparty_email, summary,
-                 channel, source_ref, source_link, category, status or "open", importance,
-                 confidence, due_at or None, now, last_activity, now),
+                 channel, source_ref, source_link, category, 1 if fyi else 0,
+                 status or "open", importance, confidence, due_at or None, now,
+                 last_activity, now),
             )
         else:
             # Preserve a human-set status; otherwise accept the caller's or keep current.
@@ -213,13 +220,13 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
                 new_status = status or existing["status"]
             conn.execute(
                 """UPDATE loops SET counterparty=?, counterparty_email=?, summary=?,
-                       source_link=?, category=?, status=?, importance=?, confidence=?,
+                       source_link=?, category=?, fyi=?, status=?, importance=?, confidence=?,
                        due_at=?, last_activity=?, last_reviewed=?
                    WHERE id=?""",
                 (counterparty, counterparty_email or existing["counterparty_email"],
                  summary, source_link or existing["source_link"],
-                 category or existing["category"], new_status, importance, confidence,
-                 due_at or existing["due_at"], last_activity, now, lid),
+                 category or existing["category"], 1 if fyi else 0, new_status, importance,
+                 confidence, due_at or existing["due_at"], last_activity, now, lid),
             )
 
         row = conn.execute("SELECT * FROM loops WHERE id = ?", (lid,)).fetchone()
