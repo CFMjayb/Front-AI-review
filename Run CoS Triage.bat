@@ -13,13 +13,15 @@ echo ==========================================
 echo.
 echo  1. Export loops to Excel (for review)
 echo  2. Import reviewed Excel (apply actions)
-echo  3. Exit
+echo  3. Send briefing now
+echo  4. Exit
 echo.
 set /p CHOICE="Select option: "
 
 if "%CHOICE%"=="1" goto EXPORT
 if "%CHOICE%"=="2" goto IMPORT
-if "%CHOICE%"=="3" goto END
+if "%CHOICE%"=="3" goto BRIEF
+if "%CHOICE%"=="4" goto END
 echo Invalid choice.
 goto END
 
@@ -30,6 +32,14 @@ echo Exporting active loops to Excel...
 echo.
 echo Done. Open the file in data\triage\ to review.
 echo Fill in the Action column, save, then run option 2 to apply changes.
+pause
+goto END
+
+:BRIEF
+echo.
+echo Generating and sending briefing now...
+%PYTHON% -m cos.briefing
+echo.
 pause
 goto END
 
