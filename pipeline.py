@@ -126,16 +126,20 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
         transcript = front.messages_to_transcript(messages)
 
         # Cheap, AI-free pre-filter: skip the Claude review for obvious bulk /
-        # marketing / bounce mail (saves the per-conversation analysis cost).
+        # marketing / bounce mail, and for calendar meeting-response notifications
+        # (Accepted/Declined/Tentative) — neither needs AI or a loop.
         is_bulk, reason = prefilter.looks_like_bulk(conv, messages)
-        if is_bulk:
+        is_cal = prefilter.is_calendar_response(conv) if not is_bulk else False
+        if is_bulk or is_cal:
+            skip_reason = reason if is_bulk else "calendar meeting response (no AI needed)"
             if not dry_run:
-                front.add_tag(cid, "AI/spam")
+                if is_bulk:
+                    front.add_tag(cid, "AI/spam")  # calendar responses aren't spam
                 front.add_tag(cid, PROCESSED_TAG)
             else:
-                logger.info(f"[dry-run] [prefilter] would tag {cid} AI/spam (bulk)")
-            logger.info(f"[prefilter] {cid} skipped AI review — {reason}")
-            module_results["prefilter"] = {"skipped": True, "reason": reason}
+                logger.info(f"[dry-run] [prefilter] would skip {cid}: {skip_reason}")
+            logger.info(f"[prefilter] {cid} skipped AI review — {skip_reason}")
+            module_results["prefilter"] = {"skipped": True, "reason": skip_reason}
             return {
                 "conversation_id": cid,
                 "subject": conv.get("subject"),
