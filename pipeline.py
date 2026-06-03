@@ -135,6 +135,7 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
             if not dry_run:
                 if is_bulk:
                     front.add_tag(cid, "AI/spam")  # calendar responses aren't spam
+                    front.set_status(cid, "archived")
                 front.add_tag(cid, PROCESSED_TAG)
             else:
                 logger.info(f"[dry-run] [prefilter] would skip {cid}: {skip_reason}")
@@ -179,6 +180,8 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
         # Apply processed tag only after all writes succeed
         if not dry_run and result["ok"]:
             front.add_tag(cid, PROCESSED_TAG)
+            if (result.get("output") or {}).get("category") == "spam":
+                front.set_status(cid, "archived")
         elif dry_run:
             logger.info(f"[dry-run] would apply {PROCESSED_TAG} to {cid}")
 
