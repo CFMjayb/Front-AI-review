@@ -90,14 +90,18 @@ _COL = {name: idx for idx, (name, _) in enumerate(COLS, 1)}
 _URGENCY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 
 
-def _local_today() -> datetime.date:
+def _local_now() -> datetime.datetime:
     tz_name = os.environ.get("COS_TIMEZONE", "America/New_York")
     try:
         import zoneinfo
         tz = zoneinfo.ZoneInfo(tz_name)
-        return datetime.datetime.now(tz).date()
+        return datetime.datetime.now(tz)
     except Exception:
-        return datetime.date.today()
+        return datetime.datetime.now()
+
+
+def _local_today() -> datetime.date:
+    return _local_now().date()
 
 
 def _parse_date(s: str | None) -> datetime.date | None:
@@ -136,13 +140,17 @@ def _sort_key(loop: dict) -> tuple:
 
 
 def export(output_path: str | None = None) -> str:
-    today     = _local_today()
+    now       = _local_now()
+    today     = now.date()
     today_str = today.isoformat()
 
     if not output_path:
         out_dir = Path(__file__).parent / "data" / "triage"
         out_dir.mkdir(parents=True, exist_ok=True)
-        output_path = str(out_dir / f"CoS Triage {today_str}.xlsx")
+        # Include time so multiple same-day exports don't overwrite each other
+        # and so a locked file (Excel open) generates a fresh name automatically.
+        ts = now.strftime("%Y-%m-%d %H-%M")
+        output_path = str(out_dir / f"CoS Triage {ts}.xlsx")
 
     loops    = ledger.list_loops()
     deferred = ledger.list_loops(deferred_only=True)
@@ -350,7 +358,12 @@ def export(output_path: str | None = None) -> str:
     # ── Guidance sheet (GUIDANCE-1) ───────────────────────────────────────────
     _write_guidance_sheet(wb)
 
-    wb.save(output_path)
+    try:
+        wb.save(output_path)
+    except PermissionError:
+        print(f"\nERROR: Cannot write to:\n  {output_path}\n"
+              "The file may be open in Excel. Close it and try again.")
+        sys.exit(1)
     print(f"Exported {len(loops)} active + {len(deferred)} deferred -> {output_path}")
     return output_path
 

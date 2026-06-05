@@ -64,10 +64,12 @@ def _find_latest_export() -> Path | None:
     triage_dir = Path(__file__).parent / "data" / "triage"
     if not triage_dir.exists():
         return None
-    # Only match date-stamped files (CoS Triage YYYY-MM-DD.xlsx).
-    # Excludes test/verify/scratch files so they never shadow the real work file.
-    dated = sorted(triage_dir.glob("CoS Triage [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].xlsx"),
-                   reverse=True)
+    # Match date-stamped files: "CoS Triage YYYY-MM-DD.xlsx" (old) or
+    # "CoS Triage YYYY-MM-DD HH-MM.xlsx" (new).  Excludes test/scratch files.
+    dated = sorted(
+        triage_dir.glob("CoS Triage [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*.xlsx"),
+        reverse=True
+    )
     return dated[0] if dated else None
 
 
