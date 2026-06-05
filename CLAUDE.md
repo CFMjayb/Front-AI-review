@@ -70,7 +70,7 @@ Outlook/Teams/Zoom reach the agent only as **MCP tools bound to the Claude sessi
 2. "Gone quiet" threshold (default 36h, `QUIET_THRESHOLD_HOURS`).
 3. Track loops with everyone, or only above an importance bar?
 
-## Current State (2026-06-04)
+## Current State (2026-06-05)
 
 ### Architecture
 Three Cloud Run **Jobs** + one Cloud Run **Service**, all in GCP project `cfm-front-mail`:
@@ -84,46 +84,45 @@ Storage: **Firestore** (production) via `LEDGER_BACKEND=firestore`. SQLite stays
 based on `LEDGER_BACKEND` env var. Swap backends with one env var.
 
 ### Local Clone
-- Branch: `claude/chief-of-staff-tool-peRoo` (pulled 2026-06-03; 12 commits added from 2026-06-02 session on other PC)
-- Venv: `.venv\` (Python 3.14). Added `google-cloud-firestore` on 2026-06-03.
-- ADC: `gcloud auth application-default login` done on this PC (per-machine, not in OneDrive)
+- Branch: `claude/chief-of-staff-tool-peRoo` (fully synced to origin/main as of 2026-06-05)
+- Venv: `.venv\` (Python 3.14).
+- ADC: expires periodically — `Run CoS Triage.bat` auto-refreshes via browser. Per-machine, not in OneDrive.
 - `LEDGER_BACKEND` not in `.env` — defaults to sqlite for local; set env var manually for Firestore queries:
   `$env:LEDGER_BACKEND="firestore"; $env:GCP_PROJECT="cfm-front-mail"`
 
-### Firestore Ledger — Current State (2026-06-04)
-- **345 active loops** after large triage session (191 done, 5 dropped/excluded, 3 FYI)
-- All 345 loops fully backfilled: urgency, action_type, source_date, sentiment populated
-- Loops span April–June 2026
+### Firestore Ledger — Current State (2026-06-05)
+- **~327 active loops** after triage + dedup cleanup
+- All loops backfilled: urgency, action_type, source_date, sentiment, dedup_key populated
+- 4 sender rules seeded: @hq.bill.com, @bill.com, @atlanticunionbank.com, @plaud.ai → FYI
+- 4 guidance records seeded: wire-confirmations, parish-payment-questions, grant-awards, bill-com-fyi
 
-### Loop Schema (as of 2026-06-04)
-All loops now carry: `num`, `direction`, `counterparty`, `counterparty_email`, `summary`, `channel`, `source_ref`, `source_link`, `category`, `fyi`, `status`, `importance`, `confidence`, `due_at`, `source_date`, `urgency`, `action_type`, `sentiment`, `escalation_risk`, `suggested_assignee`, `deferred`, `first_seen`, `last_activity`, `last_reviewed`, `notes`, `snooze_until`
+### Loop Schema (as of 2026-06-05)
+All loops now carry: `num`, `direction`, `counterparty`, `counterparty_email`, `summary`, `channel`, `source_ref`, `source_link`, `category`, `fyi`, `status`, `importance`, `confidence`, `due_at`, `source_date`, `urgency`, `action_type`, `sentiment`, `escalation_risk`, `suggested_assignee`, `deferred`, `dedup_key`, `first_seen`, `last_activity`, `last_reviewed`, `notes`, `snooze_until`
 
-### Triage Tool — Current State (2026-06-04)
-- **Export:** 15-column redesign (Urgency, Dir, Action Type, Counterparty, Summary, Category, Age, Due, Email Date, Sentiment, Link, Triage Action, Notes, _id). Urgency×direction color scheme. Auto-filter. Age color alerts (14d=orange, 30d=red).
-- **Import:** Actions: done/drop/exclude/subscribe/fyi/defer/snooze + note-only saves. Auto-finds latest `CoS Triage YYYY-MM-DD.xlsx` only (test files excluded).
-- **Briefing:** Urgency emoji (🔴🟠🟡⚪) + action type badge per loop line. Sorted urgency-first within sections.
-- **Pipeline additions:** Bill.com → force FYI. Atlantic Union Positive Pay → SMS alert on exceptions. Plaud.ai → AI action item extraction (one loop per action). `source_date` + 5 AI fields stored on every new loop.
-- **PENDING_CHANGES.md:** 6 items queued for next batch: DEDUP-1, FORMAT-1 (dates — already fixed in redesign), FILTER-1 (sender rules), ENTITY-1, PRIORITY-1, GUIDANCE-1.
+### Triage Tool — Current State (2026-06-05)
+- **Export:** 15-column redesign + Sender Rules tab + Guidance tab. Filename now `CoS Triage YYYY-MM-DD HH-MM.xlsx` (timestamped). Locked-file → clean error message.
+- **Import:** Handles Triage sheet + Sender Rules tab + Guidance tab edits. Auto-finds latest dated file.
+- **Run CoS Triage.bat:** ADC auth check with auto-browser-reauth on expiry; single "press any key" at end.
+- **Pipeline:** DEDUP-1 live (dedup_key per loop, skips duplicate sender+subject). FILTER-1/PRIORITY-1 live (sender_rules Firestore collection, pipeline checks before Claude). GUIDANCE-1 live (guidance injected into analyze.py prompt per call).
+- **analyze.py:** Comment only posted when action required (reply/approval/payment/action items) — prevents spurious conversation date bumps on informational emails.
 
-### Config Fixes Applied 2026-06-03 (confirmed)
-1. inbox-ids = `inb_cv4ii` only ✓
-2. SOURCE_MAX_PAGES = 5 on edom-pipeline ✓
-3. LEDGER_BACKEND=firestore on edom-digest ✓
-4. teammate-ids = `tea_byq3e` — still in secret, low priority
+### Inbox Coverage (as of 2026-06-05)
+- `inbox-ids` secret: `inb_cv4ii,inb_csx96` (EDOM Jay's emails + Jay's personal work email)
+- Was missing `inb_csx96` since June 3 fix — restored 2026-06-05
 
-### Cloud Run Job Environment Variables (as of 2026-06-04)
+### Cloud Run Job Environment Variables (as of 2026-06-05)
 **edom-pipeline:** GCP_PROJECT=cfm-front-mail, USE_SECRET_MANAGER=true, LEDGER_BACKEND=firestore, EARLIEST_DATE=2026-04-01, SOURCE_MAX_PAGES=5, DRY_RUN=false, MAX_RUN_COST_USD=10
 **edom-briefing:** LEDGER_BACKEND=firestore, GCP_PROJECT=cfm-front-mail, USE_SECRET_MANAGER=true, BRIEFING_DELIVERY=email, SENDER_TRANSPORT=front, SENDER_FRONT_CHANNEL_ID=cha_gcc4a, SENDER_TO=jay@cfmins.org
-**edom-digest:** GCP_PROJECT=cfm-front-mail, USE_SECRET_MANAGER=true, LEDGER_BACKEND=firestore ✓
+**edom-digest:** GCP_PROJECT=cfm-front-mail, USE_SECRET_MANAGER=true, LEDGER_BACKEND=firestore
 
-### Process Standards (learned this session)
-- **Data migration rule:** Every data model change requires a backfill plan + verification query executed in the same session — never left for follow-up. See `PENDING_CHANGES.md` header for template.
-- **Output verification rule:** After any export/report, spot-check actual cell values and field population counts before declaring done. See `verify_backfill.py` as a model.
+### Process Standards
+- **Data migration rule:** Every data model change requires backfill + verification in the same session.
+- **Output verification rule:** Spot-check actual cell values and field counts before declaring done.
 
 ## Next Steps
 
-1. **Implement PENDING_CHANGES.md batch** — DEDUP-1 (loop dedup), FILTER-1+PRIORITY-1 (sender rules), ENTITY-1 (entity field), GUIDANCE-1 (AI guidance layer)
-2. **Deploy local changes to Cloud Run** — triage tool changes are local only; pipeline changes (Bill.com FYI, Positive Pay, Plaud.ai, new loop fields) need git commit + deploy to take effect in Cloud Run jobs
-3. **Twilio setup** — add TWILIO_ACCOUNT_SID/AUTH_TOKEN/FROM/TO secrets to GCP for Positive Pay SMS alerts
-4. **Teammate-ids** — confirm whether `tea_byq3e` should stay in scope
+1. **ENTITY-1** — entity field on loops; needs Front inbox IDs mapped to entity codes (InboxMap tab in QBOcompanies.xlsx). Prerequisite: confirm inbox ID → entity mapping with Jay.
+2. **Twilio setup** — add TWILIO_ACCOUNT_SID/AUTH_TOKEN/FROM/TO secrets to GCP for Positive Pay SMS alerts
+3. **Teammate-ids** — confirm whether `tea_byq3e` should stay in scope
+4. **inb_csx96 backlog** — first pipeline run after inbox fix will catch up; monitor for unexpected volume
 5. Remaining roadmap: M2 vault, M6 Zoom, M7 memory/voice
