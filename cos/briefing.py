@@ -50,16 +50,27 @@ def _hours_ago(iso_ts: str) -> float:
         return 0.0
 
 
+_BRIEF_URGENCY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
+
+
+def _brief_sort(loops: list[dict]) -> list[dict]:
+    """Sort for briefing: urgency tier → oldest first within tier."""
+    return sorted(loops, key=lambda l: (
+        _BRIEF_URGENCY_ORDER.get((l.get("urgency") or "normal").lower(), 4),
+        l.get("first_seen") or "",
+    ))
+
+
 def gather() -> dict:
     """Pull the day's sections from the ledger (resolved loops already excluded)."""
     from cos import calendars
-    i_owe = [l for l in ledger.list_loops(direction="i_owe") if not _is_active_snooze(l)]
-    on_you = [l for l in i_owe if not l.get("fyi")]          # real action items
-    fyi = [l for l in i_owe if l.get("fyi")]                 # informational — own section
-    waiting = [l for l in ledger.list_loops(direction="owed_to_me") if not _is_active_snooze(l)]
+    i_owe  = [l for l in ledger.list_loops(direction="i_owe")       if not _is_active_snooze(l)]
+    on_you = _brief_sort([l for l in i_owe if not l.get("fyi")])
+    fyi    = [l for l in i_owe if l.get("fyi")]
+    waiting = _brief_sort(
+        [l for l in ledger.list_loops(direction="owed_to_me") if not _is_active_snooze(l)])
     overdue = [l for l in ledger.list_loops(overdue_only=True)
                if not _is_active_snooze(l) and not l.get("fyi")]
-    # "New" counts real conversation loops only — FYI + calendar prep excluded.
     new_recent = [l for l in (on_you + waiting)
                   if l["channel"] != "calendar" and _hours_ago(l.get("first_seen")) <= 24]
     events = calendars.events_for_day()
@@ -69,12 +80,21 @@ def gather() -> dict:
             "attached": calendars.attach_loops(events), "stats": ledger.stats()}
 
 
+_URGENCY_EMOJI = {"urgent": "🔴", "high": "🟠", "normal": "🟡", "low": "⚪"}
+
+
 def _loop_line(loop: dict) -> str:
-    num = loop.get("num")
-    tag = f"**#{num}** · " if num else ""
-    bits = [f"{tag}**{loop['counterparty']}** — {loop['summary']}"]
+    num     = loop.get("num")
+    urgency = (loop.get("urgency") or "normal").lower()
+    action  = loop.get("action_type") or ""
+    tag     = f"**#{num}** · " if num else ""
+    urg_em  = _URGENCY_EMOJI.get(urgency, "")
+    act_tag = f"`{action}` " if action and action != "Review" else ""
+    bits    = [f"{urg_em} {act_tag}{tag}**{loop['counterparty']}** — {loop['summary']}"]
     if loop.get("due_at"):
         bits.append(f" _(due {loop['due_at'][:10]})_")
+    if loop.get("sentiment") in ("concerned", "frustrated", "angry"):
+        bits.append(f" ⚠️ _{loop['sentiment']}_")
     if loop.get("source_link"):
         bits.append(f" → [open]({loop['source_link']})")
     return "".join(bits)

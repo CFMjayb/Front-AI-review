@@ -91,6 +91,31 @@ def _load_correction_examples() -> str:
 
 SYSTEM = SYSTEM + _load_correction_examples()
 
+# Guidance cache — populated once per process (per Cloud Run job execution).
+_guidance_cache: list[dict] | None = None
+
+def _load_guidance_text() -> str:
+    """Return active guidance records as a prompt section, cached per process."""
+    global _guidance_cache
+    if _guidance_cache is None:
+        try:
+            from cos import ledger
+            _guidance_cache = ledger.list_guidance(active_only=True)
+        except Exception:
+            _guidance_cache = []
+    if not _guidance_cache:
+        return ""
+    lines = ["\n\n## Standing Instructions (always apply when classifying)\n"]
+    for g in _guidance_cache:
+        scope = g.get("scope") or "all"
+        prefix = f"[{scope}] " if scope != "all" else ""
+        lines.append(f"- {prefix}{g['body']}")
+    return "\n".join(lines)
+
+
+def _build_system() -> str:
+    return SYSTEM + _load_guidance_text()
+
 
 def _get_model(claude) -> str:
     return os.environ.get("ANTHROPIC_MODEL_ANALYZE", "claude-sonnet-4-6")
@@ -104,7 +129,7 @@ def analyze_transcript(claude, *, subject: str, sender: str, transcript: str) ->
     """
     user_prompt = f"Subject: {subject}\nFrom: {sender}\n\nTranscript:\n{transcript}"
     res = claude.call(
-        system=SYSTEM, user=user_prompt, model=_get_model(claude),
+        system=_build_system(), user=user_prompt, model=_get_model(claude),
         max_tokens=1200, json_mode=True, cached_system=True,
     )
     data = res.get("json")
@@ -123,7 +148,7 @@ def run(ctx: dict, claude, front) -> dict:
     user_prompt = f"Subject: {subject}\nFrom: {sender}\n\nTranscript:\n{ctx['transcript']}"
 
     res = claude.call(
-        system=SYSTEM,
+        system=_build_system(),
         user=user_prompt,
         model=_get_model(claude),
         max_tokens=1200,

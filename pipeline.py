@@ -13,7 +13,7 @@ from auth import get_anthropic_api_key, get_front_api_token
 from claude_client import ClaudeClient
 from cos import front_extract
 from front_client import FrontClient, PROCESSED_TAG
-from modules import analyze, m4_cluster, m8_draft, prefilter
+from modules import analyze, m4_cluster, m8_draft, plaud_extract, prefilter
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +125,81 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
         messages = front.get_conversation_messages(cid)
         transcript = front.messages_to_transcript(messages)
 
-        # Cheap, AI-free pre-filter: skip the Claude review for obvious bulk /
-        # marketing / bounce mail, and for calendar meeting-response notifications
-        # (Accepted/Declined/Tentative) — neither needs AI or a loop.
+        # ── Atlantic Union Positive Pay ───────────────────────────────────────
+        is_pp, has_exceptions = prefilter.is_positive_pay(conv, messages)
+        if is_pp:
+            if not has_exceptions:
+                # "No exceptions today" — archive silently, no loop, no AI cost
+                if not dry_run:
+                    front.add_tag(cid, "AI/positive-pay-clear")
+                    front.add_tag(cid, PROCESSED_TAG)
+                    front.set_status(cid, "archived")
+                logger.info(f"[positive-pay] {cid} — no exceptions, archived")
+                module_results["positive_pay"] = {"exceptions": False}
+                return {
+                    "conversation_id": cid, "subject": conv.get("subject"),
+                    "duration_s": time.time() - started, "cost_usd": 0.0,
+                    "errored": False, "prefiltered": True,
+                    "modules": module_results,
+                }
+            else:
+                # Exceptions present — create urgent loop + SMS notification
+                logger.warning(f"[positive-pay] {cid} — EXCEPTIONS FOUND, notifying")
+                if not dry_run:
+                    from cos import ledger as _ledger, notifier as _notifier
+                    _ledger.upsert_loop(
+                        direction="i_owe",
+                        counterparty="Atlantic Union Bank",
+                        summary="POSITIVE PAY — exceptions require your decision",
+                        channel="front",
+                        source_ref=cid,
+                        source_link=front_extract.front_source_link(cid),
+                        category="banking",
+                        importance=5,
+                        fyi=False,
+                    )
+                    front.add_tag(cid, "AI/positive-pay-exceptions")
+                    front.add_tag(cid, PROCESSED_TAG)
+                    _notifier.send_sms(
+                        f"POSITIVE PAY ALERT: Exceptions require your decision. "
+                        f"Open Front: https://app.frontapp.com/open/{cid}"
+                    )
+                module_results["positive_pay"] = {"exceptions": True}
+                return {
+                    "conversation_id": cid, "subject": conv.get("subject"),
+                    "duration_s": time.time() - started, "cost_usd": 0.0,
+                    "errored": False, "prefiltered": True,
+                    "modules": module_results,
+                }
+
+        # ── Plaud.ai meeting notes ────────────────────────────────────────────
+        if plaud_extract.is_plaud_email(conv, messages):
+            logger.info(f"[plaud] {cid} — extracting action items")
+            try:
+                action_items = plaud_extract.extract_action_items(conv, messages, claude, front)
+                from cos import ledger as _ledger
+                loops = plaud_extract.create_loops(
+                    conv, messages, action_items, _ledger,
+                    front_extract.front_source_link, dry_run=dry_run)
+                if not dry_run:
+                    front.add_tag(cid, "AI/meeting-notes")
+                    front.add_tag(cid, PROCESSED_TAG)
+                module_results["plaud"] = {"action_items": len(action_items), "loops": len(loops)}
+                logger.info(f"[plaud] {cid} — {len(loops)} loop(s) created")
+            except Exception as exc:
+                logger.error(f"[plaud] {cid} failed: {exc}")
+                module_results["plaud_error"] = str(exc)
+            return {
+                "conversation_id": cid, "subject": conv.get("subject"),
+                "duration_s": time.time() - started,
+                "cost_usd": getattr(claude, "_last_cost_usd", 0.0),
+                "errored": "plaud_error" in module_results,
+                "modules": module_results,
+            }
+
+        # ── Standard pre-filter (bulk / calendar) ────────────────────────────
+        # Cheap, AI-free: skip Claude review for marketing/bounce mail and
+        # calendar meeting-response notifications (Accepted/Declined/Tentative).
         is_bulk, reason = prefilter.looks_like_bulk(conv, messages)
         is_cal = prefilter.is_calendar_response(conv) if not is_bulk else False
         if is_bulk or is_cal:

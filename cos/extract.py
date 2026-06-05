@@ -8,9 +8,12 @@ cos/ms_ingest.py) do the normalization; the logic lives here.
 Normalized message:  {inbound, ts_epoch, sender_name, sender_email, recipients, text}
 Normalized thread:   {channel, source_ref, subject, source_link, messages: [...]}
 """
+import hashlib
 import logging
 import os
+import re
 import time
+from typing import Optional
 
 from cos import ledger
 
@@ -18,6 +21,59 @@ logger = logging.getLogger(__name__)
 
 NOISE_CATEGORIES = {"spam"}
 URGENCY_IMPORTANCE = {"urgent": 5, "high": 4, "normal": 3, "low": 2}
+
+
+def _derive_action_type(analysis: dict, *, fyi: bool = False) -> str:
+    if fyi:
+        return "FYI"
+    if analysis.get("requires_payment"):
+        return "Pay"
+    if analysis.get("requires_approval"):
+        return "Approve"
+    if analysis.get("requires_reply"):
+        return "Reply"
+    if analysis.get("action_items"):
+        return "Decide"
+    return "Review"
+
+# ── Dedup (DEDUP-1) ──────────────────────────────────────────────────────────
+_RE_AMOUNT   = re.compile(r'\$[\d,]+(?:\.\d+)?')
+_RE_DATE     = re.compile(r'\b\d{1,2}/\d{1,2}/\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b')
+_RE_REF      = re.compile(r'\b[A-Z]{2,6}\d{6,}\b|\bINV[-#]?\d+\b|\breminder\s+#?\d+\b',
+                           re.IGNORECASE)
+_RE_ORDINAL  = re.compile(r'\b\d+(st|nd|rd|th)\b', re.IGNORECASE)
+_RE_SPACES   = re.compile(r'\s+')
+
+def _normalize_subject(text: str) -> str:
+    s = (text or "").lower()
+    s = _RE_AMOUNT.sub(" ", s)
+    s = _RE_DATE.sub(" ", s)
+    s = _RE_REF.sub(" ", s)
+    s = _RE_ORDINAL.sub(" ", s)
+    return _RE_SPACES.sub(" ", s).strip()
+
+def _dedup_key_for(channel: str, counterparty_email: str, summary: str) -> str:
+    normalized = _normalize_subject(summary)
+    raw = f"{channel}|{counterparty_email.lower()}|{normalized}".encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()[:16]
+
+
+# ── Sender rules (FILTER-1 / PRIORITY-1) ────────────────────────────────────
+# Hard-coded fallback when Firestore is unavailable during startup / tests.
+_FALLBACK_FYI_DOMAINS = frozenset({"hq.bill.com", "bill.com"})
+
+def _get_sender_rule(sender_email: str) -> Optional[dict]:
+    """Look up a sender rule from the ledger. Returns None if no rule found."""
+    try:
+        return ledger.get_sender_rule_for_email(sender_email)
+    except Exception:
+        return None
+
+def _sender_forces_fyi_fallback(sender_email: str) -> bool:
+    """Fallback: check against hard-coded domains when ledger lookup fails."""
+    domain = sender_email.lower().split("@")[-1] if "@" in sender_email else ""
+    return any(domain == d or domain.endswith("." + d) for d in _FALLBACK_FYI_DOMAINS)
+
 
 
 def quiet_threshold_hours() -> float:
@@ -104,21 +160,72 @@ def loop_from_thread(thread: dict, analysis: dict, *, dry_run: bool = False) -> 
     importance = URGENCY_IMPORTANCE.get(analysis.get("urgency"), 3)
     confidence = float(analysis.get("urgency_confidence")
                        or analysis.get("category_confidence") or 0.5)
+
+    # Original email send date = earliest message in thread
+    messages = thread.get("messages") or []
+    first_msg = min(messages, key=lambda m: m.get("ts_epoch") or 0) if messages else None
+    source_date = iso(first_msg.get("ts_epoch")) if first_msg else ""
+
+    fyi_flag = is_fyi(analysis)
+    summary_text = _summary_from(analysis)
     common = dict(
-        summary=_summary_from(analysis), channel=channel, source_ref=source_ref,
+        summary=summary_text, channel=channel, source_ref=source_ref,
         source_link=thread.get("source_link", ""), category=analysis.get("category") or "",
-        importance=importance, confidence=confidence, fyi=is_fyi(analysis),
+        importance=importance, confidence=confidence, fyi=fyi_flag,
         due_at=analysis.get("deadline") or "", last_activity=last_iso,
+        source_date=source_date,
+        urgency=analysis.get("urgency") or "normal",
+        action_type=_derive_action_type(analysis, fyi=fyi_flag),
+        sentiment=analysis.get("sentiment") or "",
+        escalation_risk=float(analysis.get("escalation_risk") or 0.0),
+        suggested_assignee=analysis.get("suggested_assignee") or "",
     )
 
     if inbound:
+        sender_email = last.get("sender_email") or ""
+        counterparty = last.get("sender_name") or sender_email or "unknown"
+        counterparty_email = sender_email
+
+        # ── Sender rule check (FILTER-1 / PRIORITY-1) ────────────────────────
+        rule = _get_sender_rule(sender_email)
+        if rule is None and _sender_forces_fyi_fallback(sender_email):
+            # Fallback: legacy hard-coded FYI domains until Firestore rule is seeded
+            rule = {"action": "fyi"}
+
+        if rule:
+            action = rule.get("action", "")
+            if action == "exclude":
+                logger.info(f"sender-rule exclude: {source_ref} ({sender_email})")
+                return None
+            if action == "subscribe":
+                if not dry_run:
+                    ledger.upsert_loop(direction="owed_to_me", counterparty=counterparty,
+                                       counterparty_email=counterparty_email, status="open",
+                                       **{**common, "fyi": True, "action_type": "FYI"})
+                logger.info(f"sender-rule subscribe: {source_ref} ({sender_email})")
+                return None
+            if action in ("fyi", "force-category"):
+                override_cat = rule.get("category") or common.get("category") or ""
+                override_imp = int(rule.get("importance") or 0) or importance
+                fyi_common = {**common, "fyi": True, "action_type": "FYI",
+                              "category": override_cat, "importance": override_imp}
+                if not dry_run:
+                    return ledger.upsert_loop(direction="owed_to_me", counterparty=counterparty,
+                                              counterparty_email=counterparty_email,
+                                              status="open", **fyi_common)
+                logger.info(f"[dry-run] sender-rule {action}: {source_ref} ({sender_email})")
+                return {"dry_run": True, "direction": "owed_to_me", "fyi": True,
+                        "counterparty": counterparty, **common}
+            # PRIORITY-1: importance override (action not exclude/fyi/subscribe)
+            if rule.get("importance"):
+                common["importance"] = int(rule["importance"])
+        # ─────────────────────────────────────────────────────────────────────
+
         needs = (analysis.get("requires_reply") or analysis.get("requires_approval")
                  or analysis.get("requires_payment") or bool(analysis.get("action_items")))
         if not needs:
             return None
         direction, status = "i_owe", "open"
-        counterparty = last.get("sender_name") or last.get("sender_email") or "unknown"
-        counterparty_email = last.get("sender_email") or ""
     else:
         has_ask = bool(analysis.get("open_questions")) or analysis.get("requires_reply")
         if not has_ask:
@@ -130,6 +237,24 @@ def loop_from_thread(thread: dict, analysis: dict, *, dry_run: bool = False) -> 
         counterparty = recipients[0] if recipients else "unknown"
         counterparty_email = counterparty if "@" in (counterparty or "") else ""
         direction, status = "owed_to_me", "waiting"
+
+    # ── Dedup check (DEDUP-1) ────────────────────────────────────────────────
+    dk = _dedup_key_for(channel, counterparty_email, summary_text)
+    existing_dup = ledger.get_loop_by_dedup_key(dk) if not dry_run else None
+    if existing_dup and existing_dup.get("source_ref") != source_ref:
+        # Same sender + normalized subject — update last_activity only, no new loop
+        logger.info(f"dedup: {source_ref} matches loop #{existing_dup.get('num')} "
+                    f"({existing_dup.get('source_ref')}) — updating activity only")
+        ledger.upsert_loop(direction=existing_dup["direction"],
+                           counterparty=existing_dup["counterparty"],
+                           summary=existing_dup["summary"],
+                           channel=existing_dup["channel"],
+                           source_ref=existing_dup["source_ref"],
+                           fyi=bool(existing_dup.get("fyi")),
+                           last_activity=last_iso, dedup_key=dk)
+        return existing_dup
+    common["dedup_key"] = dk
+    # ─────────────────────────────────────────────────────────────────────────
 
     if dry_run:
         logger.info(f"[dry-run] would upsert {direction} {channel} loop for "

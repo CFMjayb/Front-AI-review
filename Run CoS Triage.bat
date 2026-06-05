@@ -6,11 +6,28 @@ set PYTHON=.venv\Scripts\python.exe
 set LEDGER_BACKEND=firestore
 set GCP_PROJECT=cfm-front-mail
 
+set PATH=%LOCALAPPDATA%\Google\Cloud SDK\google-cloud-sdk\bin;%PATH%
+
 echo.
 echo ==========================================
 echo   Chief of Staff -- Triage Tool
 echo ==========================================
 echo.
+
+CALL gcloud auth application-default print-access-token >nul 2>&1
+if errorlevel 1 (
+    echo Google Cloud credentials expired -- a browser window will open.
+    echo.
+    CALL gcloud auth application-default login
+    if errorlevel 1 (
+        echo.
+        echo ERROR: Re-authentication failed. Run "gcloud auth application-default login" and try again.
+        pause
+        goto END
+    )
+    echo.
+)
+
 echo  1. Export loops to Excel (for review)
 echo  2. Import reviewed Excel (apply actions)
 echo  3. Send briefing now
@@ -32,15 +49,12 @@ echo Exporting active loops to Excel...
 echo.
 echo Done. Open the file in data\triage\ to review.
 echo Fill in the Action column, save, then run option 2 to apply changes.
-pause
 goto END
 
 :BRIEF
 echo.
 echo Generating and sending briefing now...
 %PYTHON% -m cos.briefing
-echo.
-pause
 goto END
 
 :IMPORT
@@ -51,9 +65,9 @@ if "%FILEPATH%"=="" (
 ) else (
     %PYTHON% cos_triage_import.py "%FILEPATH%"
 )
-echo.
-pause
 goto END
 
 :END
+echo.
+pause
 endlocal

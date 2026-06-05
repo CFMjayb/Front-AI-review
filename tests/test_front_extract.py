@@ -202,7 +202,11 @@ def test_expire_fyi_drops_old_but_keeps_fresh(mods):
     ledger, fx = mods
     from cos import extract
     old = fx.extract_from_analysis(_conv("cnv_old"), [_msg(inbound=True)], _fyi_analysis())
-    fresh = fx.extract_from_analysis(_conv("cnv_new"), [_msg(inbound=True)], _fyi_analysis())
+    # Use a distinct summary so the fresh loop gets a different dedup_key
+    fresh_analysis = _analysis(action_summary="FYI only — weekly finance digest",
+                               requires_reply=False, requires_approval=False,
+                               requires_payment=False, open_questions=[], action_items=["archive"])
+    fresh = fx.extract_from_analysis(_conv("cnv_new"), [_msg(inbound=True)], fresh_analysis)
     # backdate one FYI loop's first_seen to 25h ago
     stamp = (datetime.datetime.now(datetime.timezone.utc)
              - datetime.timedelta(hours=25)).strftime("%Y-%m-%dT%H:%M:%SZ")

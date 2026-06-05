@@ -94,6 +94,32 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_at);
 
+-- Sender rules — pre-classify known senders before Claude is invoked.
+-- email: exact address (lower) or @domain.com pattern; exact takes precedence.
+-- action: exclude | fyi | force-category | subscribe
+CREATE TABLE IF NOT EXISTS sender_rules (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  email           TEXT NOT NULL UNIQUE,
+  action          TEXT NOT NULL,
+  category        TEXT,
+  direction       TEXT,
+  importance      INTEGER,
+  subject_pattern TEXT,
+  notes           TEXT,
+  created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sender_rules_email ON sender_rules(email);
+
+-- Persistent AI guidance — standing instructions injected into the analysis prompt.
+-- scope: all | category:X | sender:domain.com
+CREATE TABLE IF NOT EXISTS guidance (
+  key        TEXT PRIMARY KEY,
+  body       TEXT NOT NULL,
+  scope      TEXT NOT NULL DEFAULT 'all',
+  active     INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+
 -- Resolution feedback log — one row per resolve/snooze/drop. The learning
 -- substrate: how Jay triages (what he drops as noise, what he acts on fast vs
 -- defers) feeds noise-filtering + importance ranking over time.
@@ -142,8 +168,19 @@ def _migrate(conn) -> None:
             conn.execute("UPDATE loops SET num=? WHERE id=?", (i, r[0]))
     if "fyi" not in cols:
         conn.execute("ALTER TABLE loops ADD COLUMN fyi INTEGER DEFAULT 0")
-        # Backfill: existing loops whose summary reads "FYI ..." are informational.
         conn.execute("UPDATE loops SET fyi=1 WHERE summary LIKE 'FYI%'")
+    if "deferred" not in cols:
+        conn.execute("ALTER TABLE loops ADD COLUMN deferred INTEGER DEFAULT 0")
+    if "source_date" not in cols:
+        conn.execute("ALTER TABLE loops ADD COLUMN source_date TEXT")
+    for col in ("urgency", "action_type", "sentiment", "suggested_assignee"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE loops ADD COLUMN {col} TEXT")
+    if "escalation_risk" not in cols:
+        conn.execute("ALTER TABLE loops ADD COLUMN escalation_risk REAL DEFAULT 0.0")
+    if "dedup_key" not in cols:
+        conn.execute("ALTER TABLE loops ADD COLUMN dedup_key TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_loops_dedup ON loops(dedup_key)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_loops_num ON loops(num)")
 
 
@@ -182,11 +219,14 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
                 source_ref: str, source_link: str = "", counterparty_email: str = "",
                 category: str = "", importance: int = 3, confidence: float = 0.0,
                 due_at: str = "", status: str = "", last_activity: str = "",
-                fyi: bool = False) -> dict:
+                fyi: bool = False, source_date: str = "",
+                urgency: str = "", action_type: str = "", sentiment: str = "",
+                escalation_risk: float = 0.0, suggested_assignee: str = "",
+                dedup_key: str = "") -> dict:
     """Insert a loop or merge into the existing one. Returns the stored row.
 
-    Merge rules: first_seen and a manually-set status (done/dropped/snoozed) are
-    preserved; machine fields (summary, last_activity, confidence, links) refresh.
+    Merge rules: first_seen, source_date, and a manually-set status are preserved;
+    machine fields (summary, last_activity, confidence, links) refresh.
     """
     if direction not in VALID_DIRECTIONS:
         raise ValueError(f"invalid direction: {direction!r}")
@@ -198,22 +238,26 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
     last_activity = last_activity or now
 
     with _connect() as conn:
-        existing = conn.execute("SELECT * FROM loops WHERE id = ?", (lid,)).fetchone()
+        existing_row = conn.execute("SELECT * FROM loops WHERE id = ?", (lid,)).fetchone()
+        existing = dict(existing_row) if existing_row else None
 
         if existing is None:
             conn.execute(
                 """INSERT INTO loops (id, num, direction, counterparty, counterparty_email,
                        summary, channel, source_ref, source_link, category, fyi, status,
-                       importance, confidence, due_at, first_seen, last_activity,
-                       last_reviewed)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       importance, confidence, due_at, source_date, first_seen, last_activity,
+                       last_reviewed, urgency, action_type, sentiment, escalation_risk,
+                       suggested_assignee, dedup_key)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (lid, _next_num(conn), direction, counterparty, counterparty_email, summary,
                  channel, source_ref, source_link, category, 1 if fyi else 0,
-                 status or "open", importance, confidence, due_at or None, now,
-                 last_activity, now),
+                 status or "open", importance, confidence, due_at or None,
+                 source_date or None, now, last_activity, now,
+                 urgency or None, action_type or None, sentiment or None,
+                 escalation_risk or None, suggested_assignee or None,
+                 dedup_key or None),
             )
         else:
-            # Preserve a human-set status; otherwise accept the caller's or keep current.
             if existing["status"] in MANUAL_STATUSES:
                 new_status = existing["status"]
             else:
@@ -221,15 +265,36 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
             conn.execute(
                 """UPDATE loops SET counterparty=?, counterparty_email=?, summary=?,
                        source_link=?, category=?, fyi=?, status=?, importance=?, confidence=?,
-                       due_at=?, last_activity=?, last_reviewed=?
+                       due_at=?, last_activity=?, last_reviewed=?,
+                       source_date=COALESCE(source_date, ?),
+                       urgency=?, action_type=?, sentiment=?,
+                       escalation_risk=?, suggested_assignee=?,
+                       dedup_key=COALESCE(dedup_key, ?)
                    WHERE id=?""",
                 (counterparty, counterparty_email or existing["counterparty_email"],
                  summary, source_link or existing["source_link"],
                  category or existing["category"], 1 if fyi else 0, new_status, importance,
-                 confidence, due_at or existing["due_at"], last_activity, now, lid),
+                 confidence, due_at or existing["due_at"], last_activity, now,
+                 source_date or None,
+                 urgency or existing.get("urgency"), action_type or existing.get("action_type"),
+                 sentiment or existing.get("sentiment"),
+                 escalation_risk or existing.get("escalation_risk"),
+                 suggested_assignee or existing.get("suggested_assignee"),
+                 dedup_key or None, lid),
             )
 
         row = conn.execute("SELECT * FROM loops WHERE id = ?", (lid,)).fetchone()
+    return _row_to_dict(row)
+
+
+def get_loop_by_dedup_key(key: str) -> Optional[dict]:
+    """Return the most-recently-active open loop with this dedup_key, or None."""
+    if not key:
+        return None
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM loops WHERE dedup_key=? AND status NOT IN ('done','dropped') "
+            "ORDER BY last_activity DESC LIMIT 1", (key,)).fetchone()
     return _row_to_dict(row)
 
 
@@ -259,7 +324,8 @@ def snooze_by_num(num: int, until: str, *, reason: str = "") -> Optional[dict]:
 
 
 def list_loops(*, direction: str = "", channel: str = "", status: str = "",
-               overdue_only: bool = False, include_resolved: bool = False) -> list[dict]:
+               overdue_only: bool = False, include_resolved: bool = False,
+               deferred_only: bool = False) -> list[dict]:
     clauses: list[str] = []
     params: list = []
     if direction:
@@ -272,6 +338,10 @@ def list_loops(*, direction: str = "", channel: str = "", status: str = "",
         clauses.append("status NOT IN ('done','dropped')")
     if overdue_only:
         clauses.append("due_at IS NOT NULL AND due_at < ?"); params.append(now_iso())
+    if deferred_only:
+        clauses.append("deferred = 1")
+    else:
+        clauses.append("(deferred IS NULL OR deferred = 0)")
 
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     sql = (
@@ -344,6 +414,28 @@ def snooze_loop(loop_id_: str, until: str, *, reason: str = "") -> Optional[dict
         row = conn.execute("SELECT * FROM loops WHERE id = ?", (loop_id_,)).fetchone()
         if row is not None:
             _record_feedback(conn, dict(row), "snoozed", reason=reason, snooze_until=until)
+    return _row_to_dict(row)
+
+
+def patch_loop(loop_id_: str, *, notes: Optional[str] = None,
+               category: Optional[str] = None, fyi: Optional[bool] = None,
+               deferred: Optional[bool] = None) -> Optional[dict]:
+    """Update mutable human-editable fields without touching status or ingestion fields."""
+    sets, vals = [], []
+    if notes is not None:
+        sets.append("notes=?"); vals.append(notes)
+    if category is not None:
+        sets.append("category=?"); vals.append(category)
+    if fyi is not None:
+        sets.append("fyi=?"); vals.append(int(fyi))
+    if deferred is not None:
+        sets.append("deferred=?"); vals.append(int(deferred))
+    if not sets:
+        return get_loop(loop_id_)
+    vals.append(now_iso()); vals.append(loop_id_)
+    with _connect() as conn:
+        conn.execute(f"UPDATE loops SET {', '.join(sets)}, last_reviewed=? WHERE id=?", vals)
+        row = conn.execute("SELECT * FROM loops WHERE id=?", (loop_id_,)).fetchone()
     return _row_to_dict(row)
 
 
@@ -474,6 +566,93 @@ def list_events_overlapping(start_iso: str, end_iso: str) -> list[dict]:
             "ORDER BY is_all_day DESC, start_at",
             (end_iso, start_iso)).fetchall()
     return [_event_row(r) for r in rows]
+
+
+# ── Sender rules (FILTER-1 / PRIORITY-1) ────────────────────────────────────
+
+def upsert_sender_rule(*, email: str, action: str, category: str = "",
+                       direction: str = "", importance: int = 0,
+                       subject_pattern: str = "", notes: str = "") -> dict:
+    """email is an exact address (lower) or @domain.com pattern."""
+    email = email.strip().lower()
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO sender_rules (email, action, category, direction, importance,
+                   subject_pattern, notes, created_at)
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(email) DO UPDATE SET
+                   action=excluded.action, category=excluded.category,
+                   direction=excluded.direction, importance=excluded.importance,
+                   subject_pattern=excluded.subject_pattern, notes=excluded.notes""",
+            (email, action, category or None, direction or None,
+             importance or None, subject_pattern or None, notes or None, now_iso()))
+        row = conn.execute("SELECT * FROM sender_rules WHERE email=?", (email,)).fetchone()
+    return _row_to_dict(row)
+
+
+def list_sender_rules() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM sender_rules ORDER BY email").fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_sender_rule(email: str) -> bool:
+    email = email.strip().lower()
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM sender_rules WHERE email=?", (email,))
+    return cur.rowcount > 0
+
+
+def get_sender_rule_for_email(email: str) -> Optional[dict]:
+    """Exact match first, then longest-matching @domain.com suffix."""
+    email = email.strip().lower()
+    domain = email.split("@")[-1] if "@" in email else ""
+    with _connect() as conn:
+        # Exact match
+        row = conn.execute("SELECT * FROM sender_rules WHERE email=?", (email,)).fetchone()
+        if row:
+            return _row_to_dict(row)
+        # Domain-pattern match — try @sub.domain.com, then @domain.com, etc.
+        parts = domain.split(".")
+        for i in range(len(parts) - 1):
+            pattern = "@" + ".".join(parts[i:])
+            row = conn.execute("SELECT * FROM sender_rules WHERE email=?", (pattern,)).fetchone()
+            if row:
+                return _row_to_dict(row)
+    return None
+
+
+# ── Guidance (GUIDANCE-1) ────────────────────────────────────────────────────
+
+def upsert_guidance(*, key: str, body: str, scope: str = "all",
+                    active: bool = True) -> dict:
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO guidance (key, body, scope, active, created_at)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(key) DO UPDATE SET
+                   body=excluded.body, scope=excluded.scope, active=excluded.active""",
+            (key.strip().lower(), body.strip(), scope.strip() or "all",
+             1 if active else 0, now_iso()))
+        row = conn.execute("SELECT * FROM guidance WHERE key=?",
+                           (key.strip().lower(),)).fetchone()
+    return _row_to_dict(row)
+
+
+def list_guidance(*, active_only: bool = False) -> list[dict]:
+    with _connect() as conn:
+        if active_only:
+            rows = conn.execute(
+                "SELECT * FROM guidance WHERE active=1 ORDER BY key").fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM guidance ORDER BY key").fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_guidance(key: str) -> bool:
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM guidance WHERE key=?", (key.strip().lower(),))
+    return cur.rowcount > 0
 
 
 def delete_events_before(iso: str) -> int:

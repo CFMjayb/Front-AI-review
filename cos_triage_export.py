@@ -6,18 +6,22 @@ Usage:
 If output_path is omitted, writes to:
     data/triage/CoS Triage YYYY-MM-DD.xlsx
 
-Columns:
-    #       Stable loop number — used by the import script to match rows
-    Dir     i_owe (On You) or owed_to_me (Waiting)
+Columns (research-backed layout — GTD next-actions + Eisenhower matrix):
+    #             Stable loop number
+    Urgency       urgent / high / normal / low
+    Dir           On You / Waiting / FYI / Deferred
+    Action Type   Reply / Approve / Pay / Decide / Review / FYI
     Counterparty
     Summary
     Category
-    Due
-    First Seen
-    Link    Deep link back to Front
-    Action  Fill in: done / drop / snooze YYYY-MM-DD / snooze 1w / snooze 2d
-    Notes   Free text — stored on the loop record when imported
-    _id     Loop ID (do not edit — used by importer)
+    Age           Days the loop has been open
+    Due           Hard deadline (Excel date)
+    Email Date    Original send date (Excel date)
+    Sentiment     Only shown for concerned / frustrated / angry
+    Link          Deep link back to Front
+    Triage Action Fill in: done / drop / snooze / etc.
+    Notes         Free text — saved on loop record when imported
+    _id           Loop ID — hidden; used by importer
 """
 import datetime
 import os
@@ -36,67 +40,114 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
-# ── Colours ──────────────────────────────────────────────────────────────────
-RED    = "FFFCE4E4"   # i_owe / on-you rows
-YELLOW = "FFFFF9E6"   # owed_to_me / waiting rows
-GREY   = "FFF5F5F5"   # FYI rows
-HEADER = "FF2C5F8A"   # header background (navy)
-WHITE  = "FFFFFFFF"
+# ── Colours — urgency × direction (Eisenhower-inspired) ──────────────────────
+# Key: (urgency, direction) → ARGB hex
+_URGENCY_FILL: dict[tuple[str, str], str] = {
+    ("urgent",  "i_owe"):      "FFFFD0D0",  # bright red
+    ("urgent",  "owed_to_me"): "FFFFEAD0",  # bright orange
+    ("high",    "i_owe"):      "FFFFE4E4",  # light red
+    ("high",    "owed_to_me"): "FFFFF4E0",  # light orange
+    ("normal",  "i_owe"):      "FFFFF0F0",  # pale pink
+    ("normal",  "owed_to_me"): "FFFFFFF0",  # pale yellow
+    ("low",     "i_owe"):      "FFF8F8F8",  # near-white
+    ("low",     "owed_to_me"): "FFFAFAFA",  # near-white
+}
+_FYI_FILL      = "FFF5F5F5"  # grey
+_DEFERRED_FILL = "FFE3F2FD"  # blue
+_DEFAULT_FILL  = "FFFAFAFA"
 
-THIN = Side(style="thin", color="FFD0D0D0")
+HEADER  = "FF2C5F8A"   # navy header
+DIVIDER = "FFD0D8E4"   # section divider
+
+THIN   = Side(style="thin", color="FFD0D0D0")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
+DATE_FMT = "MM/DD/YYYY"
+
+# ── Column definitions ────────────────────────────────────────────────────────
 COLS = [
-    ("#",           5),
-    ("Dir",         10),
+    ("#",             5),
+    ("Urgency",       9),
+    ("Dir",           9),
+    ("Action Type",  12),
     ("Counterparty", 22),
-    ("Summary",     60),
-    ("Category",    14),
-    ("Due",         12),
-    ("First Seen",  12),
-    ("Link",        12),
-    ("Action",      22),
-    ("Notes",       35),
-    ("_id",         0),   # hidden — do not delete; used by importer
+    ("Summary",      55),
+    ("Category",     13),
+    ("Age",           6),
+    ("Due",          11),
+    ("Email Date",   11),
+    ("Sentiment",    11),
+    ("Link",         10),
+    ("Triage Action",22),
+    ("Notes",        35),
+    ("_id",           0),   # hidden — do not delete; used by importer
 ]
 
+# 1-based column index lookup — derived from COLS so additions never break these
+_COL = {name: idx for idx, (name, _) in enumerate(COLS, 1)}
 
-def _local_today() -> str:
+# Urgency sort order
+_URGENCY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
+
+
+def _local_today() -> datetime.date:
     tz_name = os.environ.get("COS_TIMEZONE", "America/New_York")
     try:
         import zoneinfo
         tz = zoneinfo.ZoneInfo(tz_name)
-        return datetime.datetime.now(tz).date().isoformat()
+        return datetime.datetime.now(tz).date()
     except Exception:
-        return datetime.date.today().isoformat()
+        return datetime.date.today()
 
 
-def _row_fill(loop: dict) -> str:
+def _parse_date(s: str | None) -> datetime.date | None:
+    if not s:
+        return None
+    try:
+        return datetime.date.fromisoformat(str(s)[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+def _age_days(first_seen: str | None, today: datetime.date) -> int | None:
+    d = _parse_date(first_seen)
+    return (today - d).days if d else None
+
+
+def _row_fill(loop: dict, *, deferred: bool = False) -> str:
+    if deferred:
+        return _DEFERRED_FILL
     if loop.get("fyi"):
-        return GREY
-    if loop.get("direction") == "i_owe":
-        return RED
-    return YELLOW
+        return _FYI_FILL
+    urgency   = (loop.get("urgency") or "normal").lower()
+    direction = loop.get("direction", "owed_to_me")
+    return _URGENCY_FILL.get((urgency, direction), _DEFAULT_FILL)
+
+
+def _sort_key(loop: dict) -> tuple:
+    if loop.get("fyi"):
+        return (10, 0, 0, loop.get("first_seen") or "")
+    urgency   = (loop.get("urgency") or "normal").lower()
+    urg_order = _URGENCY_ORDER.get(urgency, 4)
+    dir_order = 0 if loop["direction"] == "i_owe" else 1
+    # Oldest first within same urgency+direction — longest-waiting surfaces first
+    age_key   = loop.get("first_seen") or "9999"
+    return (urg_order, dir_order, age_key, 0)
 
 
 def export(output_path: str | None = None) -> str:
-    today = _local_today()
+    today     = _local_today()
+    today_str = today.isoformat()
+
     if not output_path:
         out_dir = Path(__file__).parent / "data" / "triage"
         out_dir.mkdir(parents=True, exist_ok=True)
-        output_path = str(out_dir / f"CoS Triage {today}.xlsx")
+        output_path = str(out_dir / f"CoS Triage {today_str}.xlsx")
 
-    loops = ledger.list_loops()
+    loops    = ledger.list_loops()
+    deferred = ledger.list_loops(deferred_only=True)
 
-    # Sort: i_owe (non-FYI) first by importance desc, then owed_to_me, then FYI
-    def sort_key(l):
-        fyi = 1 if l.get("fyi") else 0
-        dir_order = 0 if l["direction"] == "i_owe" else 1
-        importance = -(l.get("importance") or 3)
-        due = l.get("due_at") or "9999"
-        return (fyi, dir_order, importance, due)
-
-    loops.sort(key=sort_key)
+    loops.sort(key=_sort_key)
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -104,68 +155,133 @@ def export(output_path: str | None = None) -> str:
     ws.freeze_panes = "A2"
 
     # ── Header row ───────────────────────────────────────────────────────────
-    hdr_font   = Font(bold=True, color="FFFFFFFF", size=11)
-    hdr_fill   = PatternFill("solid", fgColor=HEADER)
-    hdr_align  = Alignment(horizontal="center", vertical="center", wrap_text=False)
+    hdr_font  = Font(bold=True, color="FFFFFFFF", size=11)
+    hdr_fill  = PatternFill("solid", fgColor=HEADER)
+    hdr_align = Alignment(horizontal="center", vertical="center", wrap_text=False)
 
     for col_idx, (name, _) in enumerate(COLS, start=1):
         cell = ws.cell(row=1, column=col_idx, value=name)
-        cell.font = hdr_font
-        cell.fill = hdr_fill
+        cell.font  = hdr_font
+        cell.fill  = hdr_fill
         cell.alignment = hdr_align
         cell.border = BORDER
-
     ws.row_dimensions[1].height = 20
 
-    # ── Data rows ────────────────────────────────────────────────────────────
-    for row_idx, loop in enumerate(loops, start=2):
-        fill = PatternFill("solid", fgColor=_row_fill(loop))
-        num        = loop.get("num") or ""
-        direction  = "On You" if loop["direction"] == "i_owe" else "Waiting"
-        if loop.get("fyi"):
-            direction = "FYI"
-        due = (loop.get("due_at") or "")[:10]
-        first_seen = (loop.get("first_seen") or "")[:10]
-        link = loop.get("source_link") or ""
+    # ── Row writer ────────────────────────────────────────────────────────────
+    def _write_loop_row(ws, row_idx: int, loop: dict, *, is_deferred: bool = False):
+        fill = PatternFill("solid", fgColor=_row_fill(loop, deferred=is_deferred))
+
+        urgency  = (loop.get("urgency") or "normal").lower()
+        dir_raw  = loop.get("direction", "owed_to_me")
+
+        if is_deferred:
+            dir_label = "Deferred"
+        elif loop.get("fyi"):
+            dir_label = "FYI"
+        elif dir_raw == "i_owe":
+            dir_label = "On You"
+        else:
+            dir_label = "Waiting"
+
+        # Sentiment: only surface negative values
+        raw_sentiment = (loop.get("sentiment") or "").lower()
+        sentiment_display = raw_sentiment if raw_sentiment in (
+            "concerned", "frustrated", "angry") else ""
+
+        age = _age_days(loop.get("first_seen"), today)
 
         values = [
-            num,
-            direction,
-            loop.get("counterparty") or "",
-            loop.get("summary") or "",
-            loop.get("category") or "",
-            due,
-            first_seen,
-            link,
-            "",   # Action — user fills in
-            "",   # Notes  — user fills in
-            loop.get("id") or "",
+            loop.get("num") or "",           # #
+            urgency,                          # Urgency
+            dir_label,                        # Dir
+            loop.get("action_type") or "",    # Action Type
+            loop.get("counterparty") or "",   # Counterparty
+            loop.get("summary") or "",        # Summary
+            loop.get("category") or "",       # Category
+            age if age is not None else "",   # Age
+            _parse_date(loop.get("due_at")),  # Due (Excel date)
+            _parse_date(loop.get("source_date")),  # Email Date (Excel date)
+            sentiment_display,                # Sentiment
+            loop.get("source_link") or "",    # Link
+            "",                               # Triage Action — user fills
+            "",                               # Notes — user fills
+            loop.get("id") or "",             # _id (hidden)
         ]
 
         for col_idx, val in enumerate(values, start=1):
             cell = ws.cell(row=row_idx, column=col_idx, value=val)
-            cell.fill = fill
+            cell.fill   = fill
             cell.border = BORDER
-            cell.alignment = Alignment(vertical="top", wrap_text=(col_idx == 4))
-            if col_idx == 4:  # Summary — taller row
+            cell.alignment = Alignment(
+                vertical="top",
+                wrap_text=(col_idx == _COL["Summary"]),
+            )
+
+            # Date cells — native Excel date format
+            if col_idx in (_COL["Due"], _COL["Email Date"]) and val is not None:
+                cell.number_format = DATE_FMT
+
+            # Summary row height
+            if col_idx == _COL["Summary"]:
                 ws.row_dimensions[row_idx].height = 40
-            if col_idx == 8 and val:  # Link — hyperlink
+
+            # Age color: red ≥30d, orange ≥14d
+            if col_idx == _COL["Age"] and isinstance(val, int):
+                if val >= 30:
+                    cell.font = Font(bold=True, color="FFCC0000")
+                elif val >= 14:
+                    cell.font = Font(bold=True, color="FFCC6600")
+
+            # Urgency label bold for urgent/high
+            if col_idx == _COL["Urgency"] and urgency in ("urgent", "high"):
+                cell.font = Font(bold=True)
+
+            # Link — hyperlink
+            if col_idx == _COL["Link"] and val:
                 cell.hyperlink = val
                 cell.value = "open"
-                cell.font = Font(color="FF0563C1", underline="single")
+                cell.font  = Font(color="FF0563C1", underline="single")
 
-    # ── Action column dropdown ────────────────────────────────────────────────
-    action_col = next(i for i, (n, _) in enumerate(COLS, 1) if n == "Action")
+    # ── Main rows ─────────────────────────────────────────────────────────────
+    next_row = 2
+    for loop in loops:
+        _write_loop_row(ws, next_row, loop)
+        next_row += 1
+
+    # ── Deferred section ──────────────────────────────────────────────────────
+    if deferred:
+        div_fill = PatternFill("solid", fgColor=DIVIDER)
+        div_font = Font(bold=True, size=10, color="FF555555")
+        label = (f"Deferred — Review Later  "
+                 f"({len(deferred)} item{'s' if len(deferred) != 1 else ''})")
+        for col_idx in range(1, len(COLS) + 1):
+            cell = ws.cell(row=next_row, column=col_idx,
+                           value=(label if col_idx == 1 else ""))
+            cell.fill   = div_fill
+            cell.font   = div_font
+            cell.border = BORDER
+        ws.row_dimensions[next_row].height = 16
+        next_row += 1
+
+        for loop in deferred:
+            _write_loop_row(ws, next_row, loop, is_deferred=True)
+            next_row += 1
+
+    # ── Triage Action dropdown ────────────────────────────────────────────────
+    action_col  = _COL["Triage Action"]
+    total_rows  = next_row - 1
     dv = DataValidation(
         type="list",
-        formula1='"done,drop,snooze 1d,snooze 3d,snooze 1w,snooze 2w,snooze 1m"',
+        formula1='"done,drop,exclude,subscribe,fyi,defer,'
+                 'snooze 1d,snooze 3d,snooze 1w,snooze 2w,snooze 1m"',
         allow_blank=True,
         showDropDown=False,
     )
-    dv.sqref = f"{get_column_letter(action_col)}2:{get_column_letter(action_col)}{len(loops)+1}"
+    dv.sqref = (f"{get_column_letter(action_col)}2:"
+                f"{get_column_letter(action_col)}{total_rows}")
     ws.add_data_validation(dv)
 
-    # ── Column widths + hide _id ─────────────────────────────────────────────
+    # ── Column widths + hide _id ──────────────────────────────────────────────
     for col_idx, (name, width) in enumerate(COLS, start=1):
         col_letter = get_column_letter(col_idx)
         if width == 0:
@@ -173,47 +289,224 @@ def export(output_path: str | None = None) -> str:
         else:
             ws.column_dimensions[col_letter].width = width
 
-    # ── Summary row at top (row 1 is headers; insert info in sheet tab) ──────
+    # ── Auto-filter ───────────────────────────────────────────────────────────
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(COLS))}1"
+
     ws.sheet_properties.tabColor = "2C5F8A"
 
-    # ── Instructions sheet ───────────────────────────────────────────────────
+    # ── Instructions sheet ────────────────────────────────────────────────────
     info = wb.create_sheet("Instructions")
     instructions = [
         ("CoS Triage Spreadsheet", True),
         ("", False),
-        (f"Generated: {today}  |  {len(loops)} active loops", False),
+        (f"Generated: {today_str}  |  "
+         f"{len(loops)} active + {len(deferred)} deferred loops", False),
         ("", False),
-        ("HOW TO USE:", True),
-        ("1. Review the Triage sheet. Rows are colour-coded:", False),
-        ("   Red   = On You (i_owe) — you owe someone a response or action", False),
-        ("   Yellow = Waiting  — you're waiting on someone else", False),
-        ("   Grey  = FYI       — informational, auto-clears in 24h", False),
+        ("COLOUR KEY:", True),
+        ("  Rows are coloured by urgency × direction:", False),
+        ("  Bright red    = Urgent / On You", False),
+        ("  Bright orange = Urgent / Waiting", False),
+        ("  Light red     = High / On You", False),
+        ("  Light orange  = High / Waiting", False),
+        ("  Pale pink     = Normal / On You", False),
+        ("  Pale yellow   = Normal / Waiting", False),
+        ("  Grey          = FYI (auto-clears in 24h)", False),
+        ("  Blue          = Deferred (parked for later)", False),
         ("", False),
-        ("2. Fill in the Action column for any loop you want to resolve:", False),
-        ("   done          — mark the loop as completed", False),
-        ("   drop          — discard it (won't appear again)", False),
-        ("   snooze 1d     — hide for 1 day", False),
-        ("   snooze 1w     — hide for 1 week", False),
-        ("   snooze 2w     — hide for 2 weeks", False),
-        ("   snooze 1m     — hide for 1 month", False),
-        ("   snooze YYYY-MM-DD  — hide until a specific date", False),
-        ("   (leave blank)      — no change", False),
+        ("AGE COLUMN:", True),
+        ("  Orange bold = open 14+ days.  Red bold = open 30+ days.", False),
         ("", False),
-        ("3. Optionally add a Note — it will be saved on the loop record.", False),
+        ("TRIAGE ACTIONS:", True),
+        ("  done          — mark the loop as completed", False),
+        ("  drop          — discard (won't appear again)", False),
+        ("  exclude       — drop + tag as junk (trains future classification)", False),
+        ("  subscribe     — tag in Front as reading-list + drop", False),
+        ("  fyi           — re-classify as notification; auto-clears in 24h", False),
+        ("  defer         — move to Deferred section; hidden from briefing", False),
+        ("  snooze 1d/3d/1w/2w/1m  — hide until that time", False),
+        ("  snooze YYYY-MM-DD      — hide until specific date", False),
+        ("  (blank)       — no action; Notes still saved if filled in", False),
         ("", False),
-        ("4. Save the file and run:  Run CoS Triage.bat  → option 2 (Import)", False),
+        ("DEFERRED SECTION (blue rows at bottom):", True),
+        ("  Use done/drop/snooze on a deferred row to fully resolve it.", False),
         ("", False),
-        ("DO NOT delete or edit the _id column — the importer uses it to match rows.", False),
+        ("NOTES:", True),
+        ("  Fill in the Notes column on any row — saved for any action, "
+         "or even with no action.", False),
+        ("", False),
+        ("IMPORTANT:", True),
+        ("  DO NOT delete or edit the _id column — the importer uses it.", False),
+        ("  Save file, then run: Run CoS Triage.bat → option 2 (Import)", False),
     ]
     for text, bold in instructions:
-        row = info.append([text])
+        info.append([text])
         if bold:
             info.cell(info.max_row, 1).font = Font(bold=True, size=12)
-    info.column_dimensions["A"].width = 70
+    info.column_dimensions["A"].width = 72
+
+    # ── Sender Rules sheet (FILTER-1 / PRIORITY-1) ───────────────────────────
+    _write_sender_rules_sheet(wb)
+
+    # ── Guidance sheet (GUIDANCE-1) ───────────────────────────────────────────
+    _write_guidance_sheet(wb)
 
     wb.save(output_path)
-    print(f"Exported {len(loops)} loops -> {output_path}")
+    print(f"Exported {len(loops)} active + {len(deferred)} deferred -> {output_path}")
     return output_path
+
+
+def _write_sender_rules_sheet(wb: openpyxl.Workbook) -> None:
+    from cos import ledger as _ledger
+    rules = _ledger.list_sender_rules()
+
+    ws = wb.create_sheet("Sender Rules")
+    ws.sheet_properties.tabColor = "C05A00"
+
+    HDR_COLS = [
+        ("Email / Domain", 28),
+        ("Action",         14),
+        ("Category",       14),
+        ("Direction",      13),
+        ("Importance",     11),
+        ("Subject Pattern",22),
+        ("Notes",          35),
+        ("_delete",         8),  # user puts 'yes' to remove the rule on import
+    ]
+    hdr_font  = Font(bold=True, color="FFFFFFFF", size=11)
+    hdr_fill  = PatternFill("solid", fgColor="FFC05A00")
+    hdr_align = Alignment(horizontal="center", vertical="center")
+
+    for ci, (name, width) in enumerate(HDR_COLS, 1):
+        cell = ws.cell(row=1, column=ci, value=name)
+        cell.font = hdr_font; cell.fill = hdr_fill; cell.alignment = hdr_align
+        cell.border = BORDER
+        ws.column_dimensions[get_column_letter(ci)].width = width
+    ws.row_dimensions[1].height = 20
+    ws.freeze_panes = "A2"
+
+    row_fill = PatternFill("solid", fgColor="FFFFF8F0")
+    for ri, rule in enumerate(rules, 2):
+        vals = [
+            rule.get("email") or "",
+            rule.get("action") or "",
+            rule.get("category") or "",
+            rule.get("direction") or "",
+            rule.get("importance") or "",
+            rule.get("subject_pattern") or "",
+            rule.get("notes") or "",
+            "",
+        ]
+        for ci, val in enumerate(vals, 1):
+            cell = ws.cell(row=ri, column=ci, value=val)
+            cell.fill = row_fill; cell.border = BORDER
+            cell.alignment = Alignment(vertical="top")
+
+    # Action dropdown
+    dv = DataValidation(type="list",
+                        formula1='"exclude,fyi,force-category,subscribe"',
+                        allow_blank=True, showDropDown=False)
+    if len(rules) > 0:
+        dv.sqref = f"B2:B{len(rules)+1}"
+        ws.add_data_validation(dv)
+
+    # Instructions in col I
+    instrs = [
+        "SENDER RULES — pre-classify senders before Claude is invoked.",
+        "",
+        "Action values:",
+        "  exclude        — skip entirely (no loop created)",
+        "  fyi            — force FYI classification",
+        "  force-category — create loop but override category",
+        "  subscribe      — tag as reading-list and drop",
+        "",
+        "Email / Domain:",
+        "  Exact:  user@example.com",
+        "  Domain: @example.com  (matches all addresses at that domain)",
+        "  Subdomain: @hq.bill.com  (matches hq.bill.com only)",
+        "",
+        "Importance: 1-5 overrides AI urgency (PRIORITY-1).",
+        "Subject Pattern: regex matched against summary.",
+        "_delete: put 'yes' to remove a rule on next import.",
+        "",
+        "Save and run: Run CoS Triage.bat -> option 2 (Import)",
+    ]
+    ws.column_dimensions["I"].width = 55
+    for ri, line in enumerate(instrs, 1):
+        cell = ws.cell(row=ri, column=9, value=line)
+        if ri == 1:
+            cell.font = Font(bold=True)
+
+
+def _write_guidance_sheet(wb: openpyxl.Workbook) -> None:
+    from cos import ledger as _ledger
+    items = _ledger.list_guidance()
+
+    ws = wb.create_sheet("Guidance")
+    ws.sheet_properties.tabColor = "1A6B3A"
+
+    HDR_COLS = [
+        ("Key",    18),
+        ("Scope",  20),
+        ("Body",   65),
+        ("Active",  8),
+        ("_delete", 8),
+    ]
+    hdr_font  = Font(bold=True, color="FFFFFFFF", size=11)
+    hdr_fill  = PatternFill("solid", fgColor="FF1A6B3A")
+    hdr_align = Alignment(horizontal="center", vertical="center")
+
+    for ci, (name, width) in enumerate(HDR_COLS, 1):
+        cell = ws.cell(row=1, column=ci, value=name)
+        cell.font = hdr_font; cell.fill = hdr_fill; cell.alignment = hdr_align
+        cell.border = BORDER
+        ws.column_dimensions[get_column_letter(ci)].width = width
+    ws.row_dimensions[1].height = 20
+    ws.freeze_panes = "A2"
+
+    row_fill = PatternFill("solid", fgColor="FFF0FFF4")
+    for ri, g in enumerate(items, 2):
+        vals = [
+            g.get("key") or "",
+            g.get("scope") or "all",
+            g.get("body") or "",
+            "yes" if g.get("active") else "no",
+            "",
+        ]
+        for ci, val in enumerate(vals, 1):
+            cell = ws.cell(row=ri, column=ci, value=val)
+            cell.fill = row_fill; cell.border = BORDER
+            cell.alignment = Alignment(vertical="top",
+                                       wrap_text=(ci == 3))  # Body wraps
+        ws.row_dimensions[ri].height = 40
+
+    # Active dropdown
+    dv_active = DataValidation(type="list", formula1='"yes,no"',
+                               allow_blank=True, showDropDown=False)
+    if items:
+        dv_active.sqref = f"D2:D{len(items)+1}"
+        ws.add_data_validation(dv_active)
+
+    # Instructions in col F
+    instrs = [
+        "GUIDANCE — standing instructions injected into every AI analysis.",
+        "",
+        "Key: short slug (e.g. wire-confirmations)",
+        "Scope: all | category:finance | sender:atlanticunionbank.com",
+        "Body: plain English instruction for Claude.",
+        "Active: yes/no  — toggle without deleting.",
+        "_delete: put 'yes' to remove on next import.",
+        "",
+        "Examples:",
+        '  "Wire transfer confirmation emails are always FYI."',
+        '  "Parish emails asking about payment status are i_owe / finance / high."',
+        "",
+        "Save and run: Run CoS Triage.bat -> option 2 (Import)",
+    ]
+    ws.column_dimensions["F"].width = 58
+    for ri, line in enumerate(instrs, 1):
+        cell = ws.cell(row=ri, column=6, value=line)
+        if ri == 1:
+            cell.font = Font(bold=True)
 
 
 if __name__ == "__main__":

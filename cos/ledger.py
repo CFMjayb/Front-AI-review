@@ -29,12 +29,25 @@ init_db = _b.init_db
 upsert_loop = _b.upsert_loop
 get_loop = _b.get_loop
 get_loop_by_num = _b.get_loop_by_num
+get_loop_by_dedup_key = _b.get_loop_by_dedup_key
 list_loops = _b.list_loops
 resolve_loop = _b.resolve_loop
 snooze_loop = _b.snooze_loop
+patch_loop = _b.patch_loop
 resolve_by_num = _b.resolve_by_num
 snooze_by_num = _b.snooze_by_num
 stats = _b.stats
+
+# Sender rules
+upsert_sender_rule = _b.upsert_sender_rule
+list_sender_rules = _b.list_sender_rules
+delete_sender_rule = _b.delete_sender_rule
+get_sender_rule_for_email = _b.get_sender_rule_for_email
+
+# Guidance
+upsert_guidance = _b.upsert_guidance
+list_guidance = _b.list_guidance
+delete_guidance = _b.delete_guidance
 
 # Learning / feedback
 list_feedback = _b.list_feedback

@@ -52,6 +52,57 @@ _CAL_RESPONSE = re.compile(
 )
 
 
+# ── Atlantic Union Positive Pay ───────────────────────────────────────────────
+
+_ATLANTIC_UNION_DOMAINS = ("atlanticunionbank.com", "atlanticunion.com")
+
+_POSITIVE_PAY_SUBJECT = re.compile(r"positive.?pay", re.I)
+
+# Phrases in the email body that mean NO exceptions — safe to file silently.
+_NO_EXCEPTION_PATTERNS = re.compile(
+    r"no\s+(?:check\s+)?exceptions?\s+(?:today|found|to\s+review|reported|on\s+file)|"
+    r"0\s+(?:check\s+)?exceptions?|"
+    r"there\s+are\s+no\s+(?:items?|exceptions?)\s+(?:requiring|to)\s+(?:your\s+)?(?:review|decision|action)",
+    re.I,
+)
+
+
+def _sender_domain(messages: list[dict]) -> str:
+    inbound = [m for m in messages if m.get("is_inbound")]
+    if not inbound:
+        return ""
+    latest = max(inbound, key=lambda m: m.get("created_at") or 0)
+    email = _sender(latest)
+    return email.split("@")[-1] if "@" in email else ""
+
+
+def is_positive_pay(conv: dict, messages: list[dict]) -> tuple[bool, bool]:
+    """Return (is_positive_pay_email, has_exceptions).
+
+    is_positive_pay_email: True when this is an Atlantic Union Positive Pay notification.
+    has_exceptions: True when the email reports items that need decisioning.
+                    False means "no exceptions today" — file silently.
+    """
+    subject = conv.get("subject") or ""
+    if not _POSITIVE_PAY_SUBJECT.search(subject):
+        return False, False
+
+    domain = _sender_domain(messages)
+    if not any(domain == d or domain.endswith("." + d) for d in _ATLANTIC_UNION_DOMAINS):
+        return False, False
+
+    # It IS a Positive Pay email — now determine if it has exceptions
+    body = ""
+    inbound = [m for m in messages if m.get("is_inbound")]
+    if inbound:
+        from front_client import FrontClient
+        latest = max(inbound, key=lambda m: m.get("created_at") or 0)
+        body = FrontClient.extract_plain_text_body(latest) or ""
+
+    has_exceptions = not bool(_NO_EXCEPTION_PATTERNS.search(body))
+    return True, has_exceptions
+
+
 def is_calendar_response(conv: dict) -> bool:
     """True for a calendar meeting-response notification (Accepted/Declined/Tentative).
     These are auto-generated and need no AI review or loop."""

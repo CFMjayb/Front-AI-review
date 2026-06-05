@@ -24,13 +24,15 @@ VALID_DIRECTIONS = {"i_owe", "owed_to_me"}
 VALID_STATUSES = {"open", "waiting", "snoozed", "done", "dropped"}
 MANUAL_STATUSES = {"done", "dropped", "snoozed"}
 
-_LOOPS = "loops"
-_PEOPLE = "people"
-_MEMORY = "memory"
-_SEEN = "seen"
-_EVENTS = "events"
-_FEEDBACK = "feedback"
-_COUNTERS = "_counters"
+_LOOPS        = "loops"
+_PEOPLE       = "people"
+_MEMORY       = "memory"
+_SEEN         = "seen"
+_EVENTS       = "events"
+_FEEDBACK     = "feedback"
+_COUNTERS     = "_counters"
+_SENDER_RULES = "sender_rules"
+_GUIDANCE     = "guidance"
 
 _client: Optional[firestore.Client] = None
 
@@ -70,7 +72,10 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
                 source_ref: str, source_link: str = "", counterparty_email: str = "",
                 category: str = "", importance: int = 3, confidence: float = 0.0,
                 due_at: str = "", status: str = "", last_activity: str = "",
-                fyi: bool = False) -> dict:
+                fyi: bool = False, source_date: str = "",
+                urgency: str = "", action_type: str = "", sentiment: str = "",
+                escalation_risk: float = 0.0, suggested_assignee: str = "",
+                dedup_key: str = "") -> dict:
     if direction not in VALID_DIRECTIONS:
         raise ValueError(f"invalid direction: {direction!r}")
     if status and status not in VALID_STATUSES:
@@ -96,6 +101,11 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
                 "channel": channel, "source_ref": source_ref, "source_link": source_link,
                 "category": category, "fyi": bool(fyi), "status": status or "open",
                 "importance": importance, "confidence": confidence, "due_at": due_at or None,
+                "source_date": source_date or None,
+                "urgency": urgency or None, "action_type": action_type or None,
+                "sentiment": sentiment or None, "escalation_risk": escalation_risk or None,
+                "suggested_assignee": suggested_assignee or None,
+                "dedup_key": dedup_key or None,
                 "snooze_until": None, "first_seen": now, "last_activity": last_activity,
                 "last_reviewed": now, "notes": None,
             })
@@ -103,7 +113,7 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
             ex = snap.to_dict()
             new_status = (ex["status"] if ex.get("status") in MANUAL_STATUSES
                           else (status or ex.get("status")))
-            txn.update(ref, {
+            updates = {
                 "counterparty": counterparty,
                 "counterparty_email": counterparty_email or ex.get("counterparty_email"),
                 "summary": summary, "source_link": source_link or ex.get("source_link"),
@@ -111,7 +121,17 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
                 "status": new_status, "importance": importance, "confidence": confidence,
                 "due_at": due_at or ex.get("due_at"), "last_activity": last_activity,
                 "last_reviewed": now,
-            })
+                "urgency": urgency or ex.get("urgency"),
+                "action_type": action_type or ex.get("action_type"),
+                "sentiment": sentiment or ex.get("sentiment"),
+                "escalation_risk": escalation_risk or ex.get("escalation_risk"),
+                "suggested_assignee": suggested_assignee or ex.get("suggested_assignee"),
+            }
+            if source_date and not ex.get("source_date"):
+                updates["source_date"] = source_date
+            if dedup_key and not ex.get("dedup_key"):
+                updates["dedup_key"] = dedup_key
+            txn.update(ref, updates)
 
     _txn(db.transaction())
     return _loop_doc(ref.get())
@@ -135,6 +155,20 @@ def resolve_by_num(num: int, status: str, *, reason: str = "") -> Optional[dict]
 def snooze_by_num(num: int, until: str, *, reason: str = "") -> Optional[dict]:
     loop = get_loop_by_num(num)
     return snooze_loop(loop["id"], until, reason=reason) if loop else None
+
+
+def get_loop_by_dedup_key(key: str) -> Optional[dict]:
+    """Return the most-recently-active open loop with this dedup_key, or None."""
+    if not key:
+        return None
+    docs = list(_db().collection(_LOOPS)
+                .where(filter=FieldFilter("dedup_key", "==", key))
+                .stream())
+    candidates = [_loop_doc(d) for d in docs
+                  if d.to_dict().get("status") not in ("done", "dropped")]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda l: l.get("last_activity") or "")
 
 
 def _age_hours(first_seen: Optional[str]) -> Optional[float]:
@@ -183,7 +217,8 @@ def _order_key(loop: dict):
 
 
 def list_loops(*, direction: str = "", channel: str = "", status: str = "",
-               overdue_only: bool = False, include_resolved: bool = False) -> list[dict]:
+               overdue_only: bool = False, include_resolved: bool = False,
+               deferred_only: bool = False) -> list[dict]:
     q = _db().collection(_LOOPS)
     if direction:
         q = q.where(filter=FieldFilter("direction", "==", direction))
@@ -198,6 +233,10 @@ def list_loops(*, direction: str = "", channel: str = "", status: str = "",
     if overdue_only:
         now = now_iso()
         loops = [l for l in loops if l.get("due_at") and l["due_at"] < now]
+    if deferred_only:
+        loops = [l for l in loops if l.get("deferred")]
+    else:
+        loops = [l for l in loops if not l.get("deferred")]
     loops.sort(key=_order_key)
     return loops
 
@@ -224,6 +263,26 @@ def snooze_loop(loop_id_: str, until: str, *, reason: str = "") -> Optional[dict
     loop = _loop_doc(snap)
     ref.update({"status": "snoozed", "snooze_until": until, "last_reviewed": now_iso()})
     _record_feedback(loop, "snoozed", reason=reason, snooze_until=until)
+    return _loop_doc(ref.get())
+
+
+def patch_loop(loop_id_: str, *, notes: Optional[str] = None,
+               category: Optional[str] = None, fyi: Optional[bool] = None,
+               deferred: Optional[bool] = None) -> Optional[dict]:
+    """Update mutable human-editable fields without touching status or ingestion fields."""
+    updates: dict = {"last_reviewed": now_iso()}
+    if notes is not None:
+        updates["notes"] = notes
+    if category is not None:
+        updates["category"] = category
+    if fyi is not None:
+        updates["fyi"] = bool(fyi)
+    if deferred is not None:
+        updates["deferred"] = bool(deferred)
+    ref = _db().collection(_LOOPS).document(loop_id_)
+    if not ref.get().exists:
+        return None
+    ref.update(updates)
     return _loop_doc(ref.get())
 
 
@@ -333,3 +392,78 @@ def delete_events_before(iso: str) -> int:
             s.reference.delete()
             n += 1
     return n
+
+
+# ── Sender rules (FILTER-1 / PRIORITY-1) ────────────────────────────────────
+
+def upsert_sender_rule(*, email: str, action: str, category: str = "",
+                       direction: str = "", importance: int = 0,
+                       subject_pattern: str = "", notes: str = "") -> dict:
+    email = email.strip().lower()
+    _db().collection(_SENDER_RULES).document(email).set({
+        "email": email, "action": action, "category": category or None,
+        "direction": direction or None, "importance": importance or None,
+        "subject_pattern": subject_pattern or None, "notes": notes or None,
+        "created_at": now_iso(),
+    }, merge=True)
+    return _db().collection(_SENDER_RULES).document(email).get().to_dict()
+
+
+def list_sender_rules() -> list[dict]:
+    rules = [s.to_dict() for s in _db().collection(_SENDER_RULES).stream()]
+    rules.sort(key=lambda r: r.get("email") or "")
+    return rules
+
+
+def delete_sender_rule(email: str) -> bool:
+    email = email.strip().lower()
+    ref = _db().collection(_SENDER_RULES).document(email)
+    if ref.get().exists:
+        ref.delete()
+        return True
+    return False
+
+
+def get_sender_rule_for_email(email: str) -> Optional[dict]:
+    """Exact match first, then longest-matching @domain.com suffix."""
+    email = email.strip().lower()
+    domain = email.split("@")[-1] if "@" in email else ""
+    snap = _db().collection(_SENDER_RULES).document(email).get()
+    if snap.exists:
+        return snap.to_dict()
+    parts = domain.split(".")
+    for i in range(len(parts) - 1):
+        pattern = "@" + ".".join(parts[i:])
+        snap = _db().collection(_SENDER_RULES).document(pattern).get()
+        if snap.exists:
+            return snap.to_dict()
+    return None
+
+
+# ── Guidance (GUIDANCE-1) ────────────────────────────────────────────────────
+
+def upsert_guidance(*, key: str, body: str, scope: str = "all",
+                    active: bool = True) -> dict:
+    key = key.strip().lower()
+    _db().collection(_GUIDANCE).document(key).set({
+        "key": key, "body": body.strip(), "scope": scope.strip() or "all",
+        "active": bool(active), "created_at": now_iso(),
+    }, merge=True)
+    return _db().collection(_GUIDANCE).document(key).get().to_dict()
+
+
+def list_guidance(*, active_only: bool = False) -> list[dict]:
+    items = [s.to_dict() for s in _db().collection(_GUIDANCE).stream()]
+    if active_only:
+        items = [g for g in items if g.get("active")]
+    items.sort(key=lambda g: g.get("key") or "")
+    return items
+
+
+def delete_guidance(key: str) -> bool:
+    key = key.strip().lower()
+    ref = _db().collection(_GUIDANCE).document(key)
+    if ref.get().exists:
+        ref.delete()
+        return True
+    return False

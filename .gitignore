@@ -16,3 +16,4 @@ data/briefings/*
 .vscode/
 .idea/
 .pytest_cache/
+data/triage/

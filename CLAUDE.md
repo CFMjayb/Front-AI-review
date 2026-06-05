@@ -1,0 +1,129 @@
+# 26-119 — Chief of Staff (Front AI Review)
+
+Cross-channel "open-loop" tracker + daily briefing, built on top of the EDOM AI Email
+Ops pipeline. Brought local from Claude Code on the web (cloud) on 2026-06-02.
+
+> The cloud environment's network-egress allowlist blocks `api2.frontapp.com`, so live
+> Front calls 403 there. The **desktop has no allowlist**, so real Front validation +
+> pipeline runs work here. That's why this was moved local.
+
+---
+
+## Repo / Git
+
+- **GitHub:** `https://github.com/CFMjayb/Front-AI-review.git` (same repo as 26-117/26-118 family)
+- **Working branch:** `claude/chief-of-staff-tool-peRoo` — the **lead branch** (14 commits ahead of `main`).
+  Treat as source of truth. `claude/relaxed-wozniak-5ynFZ` trails it by one commit.
+- Open draft PR **#1** (chief-of-staff → main).
+- This is a **real git clone** (has `.git`), unlike the 26-117 folder which is a loose file copy.
+- Before stopping a desktop session: `git add -A && git commit -m "…" && git push -u origin claude/chief-of-staff-tool-peRoo`
+
+## Local environment (this PC)
+
+- **Python:** 3.14 venv at `.venv\` (system default `py`; the 3.12 bundle is 26-100-only).
+- **Install:** `py -m venv .venv` → `.venv\Scripts\python.exe -m pip install -r requirements.txt`
+- **Secrets:** resolved via **GCP Secret Manager**, NOT pasted into `.env`.
+  - `.env` has `USE_SECRET_MANAGER=true`, `GCP_PROJECT=cfm-front-mail`.
+  - `auth.py` reads `front-api-token`, `anthropic-api-key`, `mcp-api-key`, `analyze-examples`,
+    `inbox-ids`, `teammate-ids` from project **`cfm-front-mail`** (also home of `front-mail`
+    Artifact Registry + Cloud Run service `front-ai-review`, region `us-east1`).
+  - Auth method = **Application Default Credentials**. gcloud installed at
+    `%LOCALAPPDATA%\Google\Cloud SDK\…\bin`; ran `gcloud auth application-default login`;
+    ADC file at `%APPDATA%\gcloud\application_default_credentials.json` with
+    `quota_project_id=cfm-front-mail`.
+  - **ADC is per-machine and NOT in OneDrive** — every new PC needs its own
+    `gcloud auth application-default login` (one-time). Account needs role
+    `roles/secretmanager.secretAccessor` on `cfm-front-mail`.
+  - `.env` is gitignored; no plaintext secrets on disk.
+
+## How to run
+
+```bash
+.venv\Scripts\activate
+python cli.py help                              # smoke test, no creds
+python cli.py single cnv_xxxx --dry-run         # read-only single conversation
+python cli.py single cnv_xxxx                    # live single (writes tag/draft)
+python cli.py pipeline [--dry-run]              # full pipeline across sources
+python -m pytest -q                              # 60 tests
+python cos_mcp_server.py                         # CoS ledger MCP server (HTTP :8081)
+```
+
+## Two efforts in this repo
+
+1. **EDOM AI Email Ops** (original) — per-conversation AI review. ONE review per
+   conversation, gated by the `edom-ai/processed` tag (cost control). Entry: `cli.py`,
+   `scheduler.py`, `mcp_server.py`. Logic: `pipeline.py`, `modules/` (`analyze.py` is the
+   consolidated M1–M7 review; `m8_draft.py`, `m4_cluster.py`, `corrections.py`).
+2. **Chief of Staff** (open-loop tracking) — built on top. Design in
+   `docs/chief-of-staff/DESIGN.md` + `INGESTION.md`. Code in `cos/`:
+   `ledger.py` (SQLite source of truth, `data/cos.db`), `extract.py`/`front_extract.py`
+   (open-loop extraction), `ms_ingest.py` (Outlook/Teams via MCP), `calendars.py`,
+   `briefing.py` (6 AM daily brief), `sender.py` (Front transport). Entry: `cos_mcp_server.py`;
+   briefing scheduled 06:00 in `scheduler.py`; output to `data/briefings/`.
+
+Channel access: Front is hit **directly** over HTTPS (needs `FRONT_API_TOKEN`).
+Outlook/Teams/Zoom reach the agent only as **MCP tools bound to the Claude session**.
+
+## Open design questions (from DESIGN.md)
+
+1. Briefing delivery: Front comment / email draft / file? (`BRIEFING_DELIVERY`, default `file`)
+2. "Gone quiet" threshold (default 36h, `QUIET_THRESHOLD_HOURS`).
+3. Track loops with everyone, or only above an importance bar?
+
+## Current State (2026-06-04)
+
+### Architecture
+Three Cloud Run **Jobs** + one Cloud Run **Service**, all in GCP project `cfm-front-mail`:
+- **edom-pipeline** (job) — runs every 4h via Cloud Scheduler; fetches Front conversations, tags them, extracts CoS loops into Firestore
+- **edom-briefing** (job) — runs daily at 06:00; reads Firestore ledger, sends briefing email to `jay@cfmins.org` via Front channel `cha_gcc4a`
+- **edom-digest** (job) — runs Mondays at 07:00; weekly digest
+- **front-ai-review** (service) — always-on MCP server; exposes CoS tools to Claude Code sessions
+
+Storage: **Firestore** (production) via `LEDGER_BACKEND=firestore`. SQLite stays for local dev/tests.
+`cos/ledger.py` is a facade that dispatches to `cos/ledger_firestore.py` or `cos/ledger_sqlite.py`
+based on `LEDGER_BACKEND` env var. Swap backends with one env var.
+
+### Local Clone
+- Branch: `claude/chief-of-staff-tool-peRoo` (pulled 2026-06-03; 12 commits added from 2026-06-02 session on other PC)
+- Venv: `.venv\` (Python 3.14). Added `google-cloud-firestore` on 2026-06-03.
+- ADC: `gcloud auth application-default login` done on this PC (per-machine, not in OneDrive)
+- `LEDGER_BACKEND` not in `.env` — defaults to sqlite for local; set env var manually for Firestore queries:
+  `$env:LEDGER_BACKEND="firestore"; $env:GCP_PROJECT="cfm-front-mail"`
+
+### Firestore Ledger — Current State (2026-06-04)
+- **345 active loops** after large triage session (191 done, 5 dropped/excluded, 3 FYI)
+- All 345 loops fully backfilled: urgency, action_type, source_date, sentiment populated
+- Loops span April–June 2026
+
+### Loop Schema (as of 2026-06-04)
+All loops now carry: `num`, `direction`, `counterparty`, `counterparty_email`, `summary`, `channel`, `source_ref`, `source_link`, `category`, `fyi`, `status`, `importance`, `confidence`, `due_at`, `source_date`, `urgency`, `action_type`, `sentiment`, `escalation_risk`, `suggested_assignee`, `deferred`, `first_seen`, `last_activity`, `last_reviewed`, `notes`, `snooze_until`
+
+### Triage Tool — Current State (2026-06-04)
+- **Export:** 15-column redesign (Urgency, Dir, Action Type, Counterparty, Summary, Category, Age, Due, Email Date, Sentiment, Link, Triage Action, Notes, _id). Urgency×direction color scheme. Auto-filter. Age color alerts (14d=orange, 30d=red).
+- **Import:** Actions: done/drop/exclude/subscribe/fyi/defer/snooze + note-only saves. Auto-finds latest `CoS Triage YYYY-MM-DD.xlsx` only (test files excluded).
+- **Briefing:** Urgency emoji (🔴🟠🟡⚪) + action type badge per loop line. Sorted urgency-first within sections.
+- **Pipeline additions:** Bill.com → force FYI. Atlantic Union Positive Pay → SMS alert on exceptions. Plaud.ai → AI action item extraction (one loop per action). `source_date` + 5 AI fields stored on every new loop.
+- **PENDING_CHANGES.md:** 6 items queued for next batch: DEDUP-1, FORMAT-1 (dates — already fixed in redesign), FILTER-1 (sender rules), ENTITY-1, PRIORITY-1, GUIDANCE-1.
+
+### Config Fixes Applied 2026-06-03 (confirmed)
+1. inbox-ids = `inb_cv4ii` only ✓
+2. SOURCE_MAX_PAGES = 5 on edom-pipeline ✓
+3. LEDGER_BACKEND=firestore on edom-digest ✓
+4. teammate-ids = `tea_byq3e` — still in secret, low priority
+
+### Cloud Run Job Environment Variables (as of 2026-06-04)
+**edom-pipeline:** GCP_PROJECT=cfm-front-mail, USE_SECRET_MANAGER=true, LEDGER_BACKEND=firestore, EARLIEST_DATE=2026-04-01, SOURCE_MAX_PAGES=5, DRY_RUN=false, MAX_RUN_COST_USD=10
+**edom-briefing:** LEDGER_BACKEND=firestore, GCP_PROJECT=cfm-front-mail, USE_SECRET_MANAGER=true, BRIEFING_DELIVERY=email, SENDER_TRANSPORT=front, SENDER_FRONT_CHANNEL_ID=cha_gcc4a, SENDER_TO=jay@cfmins.org
+**edom-digest:** GCP_PROJECT=cfm-front-mail, USE_SECRET_MANAGER=true, LEDGER_BACKEND=firestore ✓
+
+### Process Standards (learned this session)
+- **Data migration rule:** Every data model change requires a backfill plan + verification query executed in the same session — never left for follow-up. See `PENDING_CHANGES.md` header for template.
+- **Output verification rule:** After any export/report, spot-check actual cell values and field population counts before declaring done. See `verify_backfill.py` as a model.
+
+## Next Steps
+
+1. **Implement PENDING_CHANGES.md batch** — DEDUP-1 (loop dedup), FILTER-1+PRIORITY-1 (sender rules), ENTITY-1 (entity field), GUIDANCE-1 (AI guidance layer)
+2. **Deploy local changes to Cloud Run** — triage tool changes are local only; pipeline changes (Bill.com FYI, Positive Pay, Plaud.ai, new loop fields) need git commit + deploy to take effect in Cloud Run jobs
+3. **Twilio setup** — add TWILIO_ACCOUNT_SID/AUTH_TOKEN/FROM/TO secrets to GCP for Positive Pay SMS alerts
+4. **Teammate-ids** — confirm whether `tea_byq3e` should stay in scope
+5. Remaining roadmap: M2 vault, M6 Zoom, M7 memory/voice

@@ -8,11 +8,15 @@ If path_to_xlsx is omitted, picks the most recent file in data/triage/.
 Action column values (case-insensitive):
     done                  — resolve loop as done
     drop                  — resolve loop as dropped
+    exclude               — drop + tag as junk (helps CoS avoid re-classifying similar emails)
+    subscribe             — tag in Front as "cos/reading-list" + drop; view latest in Front
+    fyi                   — re-classify as FYI notification (grey, auto-clears 24h)
+    defer                 — move to Deferred section; hidden from main list and briefing
     snooze YYYY-MM-DD     — snooze until that date
     snooze 1d / 2d / 3d   — snooze for N days
     snooze 1w / 2w        — snooze for N weeks
     snooze 1m             — snooze for 1 month
-    (blank)               — skip, no change
+    (blank)               — no action change; Notes column still saved if filled in
 """
 import datetime
 import os
@@ -60,8 +64,11 @@ def _find_latest_export() -> Path | None:
     triage_dir = Path(__file__).parent / "data" / "triage"
     if not triage_dir.exists():
         return None
-    files = sorted(triage_dir.glob("CoS Triage *.xlsx"), reverse=True)
-    return files[0] if files else None
+    # Only match date-stamped files (CoS Triage YYYY-MM-DD.xlsx).
+    # Excludes test/verify/scratch files so they never shadow the real work file.
+    dated = sorted(triage_dir.glob("CoS Triage [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].xlsx"),
+                   reverse=True)
+    return dated[0] if dated else None
 
 
 def _col_index(headers: list[str], name: str) -> int | None:
@@ -71,15 +78,8 @@ def _col_index(headers: list[str], name: str) -> int | None:
         return None
 
 
-def run_import(xlsx_path: str | None = None) -> dict:
-    if not xlsx_path:
-        latest = _find_latest_export()
-        if not latest:
-            raise FileNotFoundError("No triage file found in data/triage/. Run export first.")
-        xlsx_path = str(latest)
-
-    print(f"Reading: {xlsx_path}")
-    wb = openpyxl.load_workbook(xlsx_path)
+def _run_triage_sheet(wb: openpyxl.Workbook) -> dict:
+    """Apply actions from the Triage sheet of an already-loaded workbook."""
     ws = wb["Triage"]
 
     # Read headers from row 1
@@ -87,7 +87,7 @@ def run_import(xlsx_path: str | None = None) -> dict:
 
     idx_id     = _col_index(headers, "_id")
     idx_num    = _col_index(headers, "#")
-    idx_action = _col_index(headers, "Action")
+    idx_action = _col_index(headers, "Triage Action") or _col_index(headers, "Action")
     idx_notes  = _col_index(headers, "Notes")
 
     if idx_id is None or idx_action is None:
@@ -102,26 +102,26 @@ def run_import(xlsx_path: str | None = None) -> dict:
         notes   = str(row[idx_notes] or "").strip() if idx_notes is not None else ""
         num     = row[idx_num] if idx_num is not None else "?"
 
-        if not loop_id or not action:
+        if not loop_id:
             skipped += 1
             continue
 
         try:
+            # Save notes first (for any action, including blank)
+            if notes:
+                existing = ledger.get_loop(loop_id)
+                if existing:
+                    combined = ((existing.get("notes") or "") + f"\n{notes}").strip()
+                    ledger.patch_loop(loop_id, notes=combined)
+
+            if not action:
+                if notes:
+                    print(f"  #{num} note saved")
+                skipped += 1
+                continue
+
             if action == "done":
                 ledger.resolve_loop(loop_id, "done")
-                if notes:
-                    # Append note to existing loop notes
-                    existing = ledger.get_loop(loop_id)
-                    if existing:
-                        combined = ((existing.get("notes") or "") + f"\n{notes}").strip()
-                        ledger.upsert_loop(
-                            direction=existing["direction"],
-                            counterparty=existing["counterparty"],
-                            summary=existing["summary"],
-                            channel=existing["channel"],
-                            source_ref=existing["source_ref"],
-                            notes=combined,
-                        )
                 print(f"  #{num} done")
                 done += 1
 
@@ -129,6 +129,37 @@ def run_import(xlsx_path: str | None = None) -> dict:
                 ledger.resolve_loop(loop_id, "dropped")
                 print(f"  #{num} dropped")
                 dropped += 1
+
+            elif action == "exclude":
+                ledger.patch_loop(loop_id, category="junk")
+                ledger.resolve_loop(loop_id, "dropped", reason="excluded:junk")
+                print(f"  #{num} excluded (junk)")
+                dropped += 1
+
+            elif action == "subscribe":
+                loop_rec = ledger.get_loop(loop_id)
+                if loop_rec and loop_rec.get("channel") == "front":
+                    try:
+                        from front_client import FrontClient
+                        from auth import get_front_api_token
+                        front = FrontClient(get_front_api_token())
+                        front.add_tag(loop_rec["source_ref"], "cos/reading-list")
+                        print(f"  #{num} tagged in Front as cos/reading-list")
+                    except Exception as exc:
+                        print(f"  #{num} WARNING: could not tag in Front: {exc}")
+                ledger.resolve_loop(loop_id, "dropped", reason="subscribed:reading-list")
+                print(f"  #{num} subscribed")
+                dropped += 1
+
+            elif action == "fyi":
+                ledger.patch_loop(loop_id, fyi=True, deferred=False)
+                print(f"  #{num} marked FYI")
+                done += 1
+
+            elif action == "defer":
+                ledger.patch_loop(loop_id, deferred=True)
+                print(f"  #{num} deferred")
+                skipped += 1  # not resolved — just moved to deferred section
 
             elif action.startswith("snooze"):
                 until = _parse_snooze_until(action)
@@ -148,18 +179,148 @@ def run_import(xlsx_path: str | None = None) -> dict:
             print(f"  #{num} ERROR: {exc}")
             errored += 1
 
-    summary = {
+    print(f"\nTriage: Done: {done}  Dropped: {dropped}  Snoozed: {snoozed}  "
+          f"Skipped: {skipped}  Errors: {errored}")
+    return {
         "done": done, "dropped": dropped, "snoozed": snoozed,
         "skipped": skipped, "errored": errored,
         "total_actioned": done + dropped + snoozed,
     }
-    print(f"\nDone: {done}  Dropped: {dropped}  Snoozed: {snoozed}  "
-          f"Skipped (no action): {skipped}  Errors: {errored}")
+
+
+def _import_sender_rules(wb: openpyxl.Workbook) -> dict:
+    if "Sender Rules" not in wb.sheetnames:
+        return {"upserted": 0, "deleted": 0}
+    ws = wb["Sender Rules"]
+    headers = [str(ws.cell(1, c).value or "").strip() for c in range(1, ws.max_column + 1)]
+
+    def _ci(name):
+        try: return headers.index(name)
+        except ValueError: return None
+
+    idx_email   = _ci("Email / Domain")
+    idx_action  = _ci("Action")
+    idx_cat     = _ci("Category")
+    idx_dir     = _ci("Direction")
+    idx_imp     = _ci("Importance")
+    idx_subj    = _ci("Subject Pattern")
+    idx_notes   = _ci("Notes")
+    idx_del     = _ci("_delete")
+
+    if idx_email is None or idx_action is None:
+        print("  Sender Rules sheet: missing required columns — skipped")
+        return {"upserted": 0, "deleted": 0}
+
+    upserted = deleted = 0
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        email = str(row[idx_email] or "").strip().lower()
+        if not email:
+            continue
+        delete_flag = str(row[idx_del] or "").strip().lower() == "yes" if idx_del is not None else False
+        if delete_flag:
+            if ledger.delete_sender_rule(email):
+                print(f"  sender-rule deleted: {email}")
+                deleted += 1
+            continue
+        action = str(row[idx_action] or "").strip().lower()
+        if not action:
+            continue
+        imp_raw = row[idx_imp] if idx_imp is not None else None
+        try:
+            imp = int(float(str(imp_raw))) if imp_raw else 0
+        except (ValueError, TypeError):
+            imp = 0
+        ledger.upsert_sender_rule(
+            email=email, action=action,
+            category=str(row[idx_cat] or "").strip() if idx_cat is not None else "",
+            direction=str(row[idx_dir] or "").strip() if idx_dir is not None else "",
+            importance=imp,
+            subject_pattern=str(row[idx_subj] or "").strip() if idx_subj is not None else "",
+            notes=str(row[idx_notes] or "").strip() if idx_notes is not None else "",
+        )
+        print(f"  sender-rule upserted: {email} -> {action}")
+        upserted += 1
+
+    return {"upserted": upserted, "deleted": deleted}
+
+
+def _import_guidance(wb: openpyxl.Workbook) -> dict:
+    if "Guidance" not in wb.sheetnames:
+        return {"upserted": 0, "deleted": 0}
+    ws = wb["Guidance"]
+    headers = [str(ws.cell(1, c).value or "").strip() for c in range(1, ws.max_column + 1)]
+
+    def _ci(name):
+        try: return headers.index(name)
+        except ValueError: return None
+
+    idx_key    = _ci("Key")
+    idx_scope  = _ci("Scope")
+    idx_body   = _ci("Body")
+    idx_active = _ci("Active")
+    idx_del    = _ci("_delete")
+
+    if idx_key is None or idx_body is None:
+        print("  Guidance sheet: missing required columns — skipped")
+        return {"upserted": 0, "deleted": 0}
+
+    upserted = deleted = 0
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        key = str(row[idx_key] or "").strip().lower()
+        if not key:
+            continue
+        delete_flag = str(row[idx_del] or "").strip().lower() == "yes" if idx_del is not None else False
+        if delete_flag:
+            if ledger.delete_guidance(key):
+                print(f"  guidance deleted: {key}")
+                deleted += 1
+            continue
+        body = str(row[idx_body] or "").strip()
+        if not body:
+            continue
+        scope  = str(row[idx_scope] or "all").strip() if idx_scope is not None else "all"
+        active_raw = str(row[idx_active] or "yes").strip().lower() if idx_active is not None else "yes"
+        active = active_raw not in ("no", "false", "0")
+        ledger.upsert_guidance(key=key, body=body, scope=scope or "all", active=active)
+        print(f"  guidance upserted: {key} (active={active})")
+        upserted += 1
+
+    return {"upserted": upserted, "deleted": deleted}
+
+
+def run_import(xlsx_path: str | None = None) -> dict:
+    # Re-named old run_import to _run_triage_import; wrapper calls both
+    return _run_all_imports(xlsx_path)
+
+
+def _run_all_imports(xlsx_path: str | None = None) -> dict:
+    if not xlsx_path:
+        latest = _find_latest_export()
+        if not latest:
+            raise FileNotFoundError("No triage file found in data/triage/. Run export first.")
+        xlsx_path = str(latest)
+
+    print(f"Reading: {xlsx_path}")
+    wb = openpyxl.load_workbook(xlsx_path)
+
+    # ── Triage sheet ─────────────────────────────────────────────────────────
+    triage_result = _run_triage_sheet(wb)
+
+    # ── Sender Rules sheet ────────────────────────────────────────────────────
+    sr = _import_sender_rules(wb)
+    if sr["upserted"] or sr["deleted"]:
+        print(f"\nSender Rules: {sr['upserted']} upserted, {sr['deleted']} deleted")
+
+    # ── Guidance sheet ────────────────────────────────────────────────────────
+    gd = _import_guidance(wb)
+    if gd["upserted"] or gd["deleted"]:
+        print(f"Guidance: {gd['upserted']} upserted, {gd['deleted']} deleted")
+
     remaining = len(ledger.list_loops())
     print(f"Active loops remaining in Firestore: {remaining}")
-    return summary
+    return {**triage_result, "sender_rules": sr, "guidance": gd}
 
 
 if __name__ == "__main__":
     path = sys.argv[1] if len(sys.argv) > 1 else None
-    run_import(path)
+    _run_all_imports(path)
