@@ -187,8 +187,16 @@ def run(ctx: dict, claude, front) -> dict:
             front.add_tag(cid, tag)
             writes.append({"type": "tag", "name": tag})
 
-        # Single analysis comment
-        if not front.has_comment_with_prefix(cid, COMMENT_PREFIX):
+        # Single analysis comment — only when action is needed.
+        # Posting a comment bumps the conversation date in Front and resurfaces
+        # it in the inbox. For purely informational emails (no reply/approval/
+        # payment/action items) the tags alone are sufficient and we avoid the
+        # spurious activity bump. Action-needed emails should resurface anyway.
+        action_needed = (
+            data.get("requires_reply") or data.get("requires_approval") or
+            data.get("requires_payment") or bool(data.get("action_items"))
+        )
+        if action_needed and not front.has_comment_with_prefix(cid, COMMENT_PREFIX):
             comment = _build_comment(data)
             front.add_comment(cid, comment)
             writes.append({"type": "comment", "prefix": COMMENT_PREFIX})
