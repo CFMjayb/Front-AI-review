@@ -23,6 +23,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any, Optional
 
 os.environ.setdefault("LEDGER_BACKEND", os.environ.get("LEDGER_BACKEND", "firestore"))
 os.environ.setdefault("GCP_PROJECT", os.environ.get("GCP_PROJECT", "cfm-front-mail"))
@@ -32,6 +33,36 @@ load_dotenv(Path(__file__).parent / ".env", override=True)
 
 from cos import ledger
 import openpyxl
+
+# ── Lazy Front client (created on first archive call) ────────────────────────
+_front_client: Optional[Any] = None
+
+
+def _get_front() -> Any:
+    global _front_client
+    if _front_client is None:
+        from front_client import FrontClient
+        from auth import get_front_api_token
+        _front_client = FrontClient(get_front_api_token())
+    return _front_client
+
+
+def _archive_in_front(loop_rec: Optional[dict], num: Any) -> None:
+    """Archive the source Front conversation when a loop is resolved.
+
+    Only acts on loops with channel=front and a source_ref.  Warns but does not
+    raise on failure so a Front error never blocks a Firestore update.
+    """
+    if not loop_rec or loop_rec.get("channel") != "front":
+        return
+    src = loop_rec.get("source_ref")
+    if not src:
+        return
+    try:
+        _get_front().set_status(src, "archived")
+        print(f"    → archived in Front ({src})")
+    except Exception as exc:
+        print(f"    WARNING: could not archive {src} in Front: {exc}")
 
 
 def _parse_snooze_until(value: str) -> str | None:
@@ -123,18 +154,24 @@ def _run_triage_sheet(wb: openpyxl.Workbook) -> dict:
                 continue
 
             if action == "done":
+                loop_rec = ledger.get_loop(loop_id)
                 ledger.resolve_loop(loop_id, "done")
+                _archive_in_front(loop_rec, num)
                 print(f"  #{num} done")
                 done += 1
 
             elif action == "drop":
+                loop_rec = ledger.get_loop(loop_id)
                 ledger.resolve_loop(loop_id, "dropped")
+                _archive_in_front(loop_rec, num)
                 print(f"  #{num} dropped")
                 dropped += 1
 
             elif action == "exclude":
+                loop_rec = ledger.get_loop(loop_id)
                 ledger.patch_loop(loop_id, category="junk")
                 ledger.resolve_loop(loop_id, "dropped", reason="excluded:junk")
+                _archive_in_front(loop_rec, num)
                 print(f"  #{num} excluded (junk)")
                 dropped += 1
 
@@ -142,10 +179,7 @@ def _run_triage_sheet(wb: openpyxl.Workbook) -> dict:
                 loop_rec = ledger.get_loop(loop_id)
                 if loop_rec and loop_rec.get("channel") == "front":
                     try:
-                        from front_client import FrontClient
-                        from auth import get_front_api_token
-                        front = FrontClient(get_front_api_token())
-                        front.add_tag(loop_rec["source_ref"], "cos/reading-list")
+                        _get_front().add_tag(loop_rec["source_ref"], "cos/reading-list")
                         print(f"  #{num} tagged in Front as cos/reading-list")
                     except Exception as exc:
                         print(f"  #{num} WARNING: could not tag in Front: {exc}")
