@@ -47,22 +47,51 @@ def _get_front() -> Any:
     return _front_client
 
 
+_FRONT_OPEN_STATUSES = {"open", "assigned", "unassigned"}
+
+
 def _archive_in_front(loop_rec: Optional[dict], num: Any) -> bool:
     """Archive the source Front conversation when a loop is resolved.
 
     Only acts on loops with channel=front and a source_ref.  Warns but does not
     raise on failure so a Front error never blocks a Firestore update.
 
-    Returns True if the archive call succeeded (caller should stamp front_archived=True),
-    False on skip (not a Front loop) or failure.
+    Checks the current Front status first:
+      - Already non-open (archived/spam/deleted) → no PATCH needed, return True
+        so the caller stamps front_archived=True in Firestore.
+      - 404 → gone from Front → same, return True.
+      - Still open → PATCH to archived → return True.
+      - Any other error → warn and return False.
+
+    Returns True if Firestore should be stamped front_archived=True.
     """
     if not loop_rec or loop_rec.get("channel") != "front":
         return False
     src = loop_rec.get("source_ref")
     if not src:
         return False
+    front = _get_front()
     try:
-        _get_front().set_status(src, "archived")
+        conv = front.get_conversation(src)
+        front_status = conv.get("status") or ""
+    except Exception as exc:
+        # 404 → conversation gone; treat as already resolved.
+        # Other errors → warn, don't stamp (status unknown).
+        status_code = getattr(exc, "status", None)
+        if status_code == 404:
+            print(f"    → Front conversation not found ({src}) — stamping anyway")
+            return True
+        print(f"    WARNING: could not fetch Front status for {src}: {exc}")
+        return False
+
+    if front_status not in _FRONT_OPEN_STATUSES:
+        # Already archived / spam — Front agrees, nothing to change.
+        print(f"    → already {front_status!r} in Front ({src}) — stamping")
+        return True
+
+    # Conversation is still open — archive it.
+    try:
+        front.set_status(src, "archived")
         print(f"    → archived in Front ({src})")
         return True
     except Exception as exc:
