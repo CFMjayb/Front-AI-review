@@ -136,13 +136,15 @@ class FakeFront:
 
 def test_reconcile_resolves_i_owe_after_jay_replies(mods):
     ledger, fx = mods
-    fx.extract_from_analysis(_conv("cnv_r"), [_msg(inbound=True)], _analysis())
+    loop = fx.extract_from_analysis(_conv("cnv_r"), [_msg(inbound=True)], _analysis())
     # Jay has since replied → last message is now outbound
     front = FakeFront({"cnv_r": [_msg(inbound=True, ago_hours=5),
                                   _msg(inbound=False, ago_hours=1)]})
     res = fx.reconcile_open_front_loops(front)
     assert res["resolved"] == 1
     assert ledger.list_loops() == []  # resolved loops hidden
+    # Reply-flip closes the loop but leaves the Front conversation open -> not stamped
+    assert not ledger.get_loop(loop["id"]).get("front_archived")
 
 
 def test_reconcile_resolves_owed_to_me_after_they_reply(mods):
@@ -157,12 +159,14 @@ def test_reconcile_resolves_owed_to_me_after_they_reply(mods):
 def test_reconcile_resolves_when_archived_in_front(mods):
     # Action-only loop (no reply): archiving the Front conversation closes it.
     ledger, fx = mods
-    fx.extract_from_analysis(_conv("cnv_a"), [_msg(inbound=True)], _analysis())
+    loop = fx.extract_from_analysis(_conv("cnv_a"), [_msg(inbound=True)], _analysis())
     assert len(ledger.list_loops()) == 1
     front = FakeFront({"cnv_a": [_msg(inbound=True)]},
                       status_by_conv={"cnv_a": "archived"})
     res = fx.reconcile_open_front_loops(front)
     assert res["resolved"] == 1
+    # Archived-in-Front reconcile also stamps front_archived so the backfill skips it
+    assert ledger.get_loop(loop["id"])["front_archived"]
     assert ledger.list_loops() == []  # resolved → hidden
 
 

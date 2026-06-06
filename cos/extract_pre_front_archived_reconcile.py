@@ -1,3 +1,18 @@
+# =============================================================================
+# BACKUP - pre-change copy of cos/extract.py (saved 2026-06-05)
+#
+# Saved before adding front_archived stamping to reconcile(). After this backup,
+# reconcile()'s is_done branch also calls
+#     ledger.patch_loop(loop_id, front_archived=True)
+# for channel=="front" loops, so a loop closed because its Front conversation was
+# already archived gets flagged, and the Front-archive backfill skips it.
+#
+# This is the last working version BEFORE that change - identical to the original
+# module, importable/runnable as-is.
+#
+# TO RESTORE:
+#   Copy-Item "cos\extract_pre_front_archived_reconcile.py" "cos\extract.py" -Force
+# =============================================================================
 """Channel-agnostic open-loop extraction core.
 
 Front, Outlook, and Teams all normalize their threads into the same shape and
@@ -314,11 +329,6 @@ def reconcile(loops: list[dict], fetch_messages, *, is_done=None,
                 if is_done(ref):
                     if not dry_run:
                         ledger.resolve_loop(loop["id"], "done")
-                        # is_done == the source thread is already archived/closed
-                        # (Front: archived/deleted/trashed). Stamp front_archived so
-                        # the backfill never re-checks this loop against Front.
-                        if loop.get("channel") == "front":
-                            ledger.patch_loop(loop["id"], front_archived=True)
                     resolved += 1
                     continue
             except Exception as exc:
