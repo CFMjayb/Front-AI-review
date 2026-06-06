@@ -77,7 +77,9 @@ def _filter_open(conversations: list[dict]) -> tuple[list[dict], int]:
     active: list[dict] = []
     skipped = 0
     for c in conversations:
-        if (c.get("status") or "open") in _OPEN_STATUSES:
+        # No "or open" default — missing/null status is treated as unknown and
+        # filtered out conservatively rather than assumed open.
+        if c.get("status") in _OPEN_STATUSES:
             active.append(c)
         else:
             skipped += 1
@@ -120,6 +122,19 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
     cost = 0.0
     errored = False
     module_results: dict = {}
+
+    # Defense-in-depth: skip any conversation that is not currently open.
+    # _filter_open handles the bulk-fetch path; this guard covers single-
+    # conversation mode and the race window between fetch and process.
+    conv_status = conv.get("status") or ""
+    if conv_status not in _OPEN_STATUSES:
+        logger.info(f"[skip] {cid} status={conv_status!r} — not open, no AI review")
+        return {
+            "conversation_id": cid, "subject": conv.get("subject"),
+            "duration_s": 0.0, "cost_usd": 0.0,
+            "errored": False, "prefiltered": True,
+            "modules": {"skip_reason": f"not_open:{conv_status}"},
+        }
 
     try:
         messages = front.get_conversation_messages(cid)
