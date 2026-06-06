@@ -180,6 +180,8 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE loops ADD COLUMN escalation_risk REAL DEFAULT 0.0")
     if "dedup_key" not in cols:
         conn.execute("ALTER TABLE loops ADD COLUMN dedup_key TEXT")
+    if "front_archived" not in cols:
+        conn.execute("ALTER TABLE loops ADD COLUMN front_archived INTEGER DEFAULT 0")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_loops_dedup ON loops(dedup_key)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_loops_num ON loops(num)")
 
@@ -419,7 +421,8 @@ def snooze_loop(loop_id_: str, until: str, *, reason: str = "") -> Optional[dict
 
 def patch_loop(loop_id_: str, *, notes: Optional[str] = None,
                category: Optional[str] = None, fyi: Optional[bool] = None,
-               deferred: Optional[bool] = None) -> Optional[dict]:
+               deferred: Optional[bool] = None,
+               front_archived: Optional[bool] = None) -> Optional[dict]:
     """Update mutable human-editable fields without touching status or ingestion fields."""
     sets, vals = [], []
     if notes is not None:
@@ -430,6 +433,8 @@ def patch_loop(loop_id_: str, *, notes: Optional[str] = None,
         sets.append("fyi=?"); vals.append(int(fyi))
     if deferred is not None:
         sets.append("deferred=?"); vals.append(int(deferred))
+    if front_archived is not None:
+        sets.append("front_archived=?"); vals.append(int(front_archived))
     if not sets:
         return get_loop(loop_id_)
     vals.append(now_iso()); vals.append(loop_id_)

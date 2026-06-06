@@ -268,7 +268,8 @@ def snooze_loop(loop_id_: str, until: str, *, reason: str = "") -> Optional[dict
 
 def patch_loop(loop_id_: str, *, notes: Optional[str] = None,
                category: Optional[str] = None, fyi: Optional[bool] = None,
-               deferred: Optional[bool] = None) -> Optional[dict]:
+               deferred: Optional[bool] = None,
+               front_archived: Optional[bool] = None) -> Optional[dict]:
     """Update mutable human-editable fields without touching status or ingestion fields."""
     updates: dict = {"last_reviewed": now_iso()}
     if notes is not None:
@@ -279,6 +280,8 @@ def patch_loop(loop_id_: str, *, notes: Optional[str] = None,
         updates["fyi"] = bool(fyi)
     if deferred is not None:
         updates["deferred"] = bool(deferred)
+    if front_archived is not None:
+        updates["front_archived"] = bool(front_archived)
     ref = _db().collection(_LOOPS).document(loop_id_)
     if not ref.get().exists:
         return None

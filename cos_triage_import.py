@@ -47,22 +47,27 @@ def _get_front() -> Any:
     return _front_client
 
 
-def _archive_in_front(loop_rec: Optional[dict], num: Any) -> None:
+def _archive_in_front(loop_rec: Optional[dict], num: Any) -> bool:
     """Archive the source Front conversation when a loop is resolved.
 
     Only acts on loops with channel=front and a source_ref.  Warns but does not
     raise on failure so a Front error never blocks a Firestore update.
+
+    Returns True if the archive call succeeded (caller should stamp front_archived=True),
+    False on skip (not a Front loop) or failure.
     """
     if not loop_rec or loop_rec.get("channel") != "front":
-        return
+        return False
     src = loop_rec.get("source_ref")
     if not src:
-        return
+        return False
     try:
         _get_front().set_status(src, "archived")
         print(f"    → archived in Front ({src})")
+        return True
     except Exception as exc:
         print(f"    WARNING: could not archive {src} in Front: {exc}")
+        return False
 
 
 def _parse_snooze_until(value: str) -> str | None:
@@ -156,14 +161,16 @@ def _run_triage_sheet(wb: openpyxl.Workbook) -> dict:
             if action == "done":
                 loop_rec = ledger.get_loop(loop_id)
                 ledger.resolve_loop(loop_id, "done")
-                _archive_in_front(loop_rec, num)
+                if _archive_in_front(loop_rec, num):
+                    ledger.patch_loop(loop_id, front_archived=True)
                 print(f"  #{num} done")
                 done += 1
 
             elif action == "drop":
                 loop_rec = ledger.get_loop(loop_id)
                 ledger.resolve_loop(loop_id, "dropped")
-                _archive_in_front(loop_rec, num)
+                if _archive_in_front(loop_rec, num):
+                    ledger.patch_loop(loop_id, front_archived=True)
                 print(f"  #{num} dropped")
                 dropped += 1
 
@@ -171,7 +178,8 @@ def _run_triage_sheet(wb: openpyxl.Workbook) -> dict:
                 loop_rec = ledger.get_loop(loop_id)
                 ledger.patch_loop(loop_id, category="junk")
                 ledger.resolve_loop(loop_id, "dropped", reason="excluded:junk")
-                _archive_in_front(loop_rec, num)
+                if _archive_in_front(loop_rec, num):
+                    ledger.patch_loop(loop_id, front_archived=True)
                 print(f"  #{num} excluded (junk)")
                 dropped += 1
 
