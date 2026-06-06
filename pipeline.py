@@ -245,6 +245,25 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
         module_results["analyze"] = result
         cost += result.get("cost_usd", 0)
 
+        # Apply the gate tag immediately after a successful analysis — BEFORE
+        # loop extraction and M8 so a 429 on any later write cannot leave the
+        # conversation untagged and get it re-processed on every pipeline run.
+        # Retry once on 429: the client already sleeps Retry-After, so a second
+        # attempt after that sleep almost always succeeds.
+        if not dry_run and result["ok"]:
+            for _attempt in range(2):
+                try:
+                    front.add_tag(cid, PROCESSED_TAG)
+                    break
+                except Exception as tag_exc:
+                    if _attempt == 0:
+                        logger.warning(f"{cid} PROCESSED_TAG attempt 1 failed ({tag_exc}), retrying")
+                    else:
+                        logger.error(f"{cid} PROCESSED_TAG could not be applied after retry: {tag_exc}")
+                        raise  # propagate so the conversation is counted as errored
+        elif dry_run:
+            logger.info(f"[dry-run] would apply {PROCESSED_TAG} to {cid}")
+
         # CoS open-loop extraction — reuses the analysis above, no extra Claude cost
         if result["ok"]:
             try:
@@ -263,14 +282,8 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
                 m8 = m8_draft.run(ctx, claude, front)
                 module_results["m8"] = m8
                 cost += m8.get("cost_usd", 0)
-
-        # Apply processed tag only after all writes succeed
-        if not dry_run and result["ok"]:
-            front.add_tag(cid, PROCESSED_TAG)
             if (result.get("output") or {}).get("category") == "spam":
                 front.set_status(cid, "archived")
-        elif dry_run:
-            logger.info(f"[dry-run] would apply {PROCESSED_TAG} to {cid}")
 
     except Exception as exc:
         errored = True
