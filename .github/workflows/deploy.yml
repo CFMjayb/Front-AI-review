@@ -56,7 +56,7 @@ jobs:
             --region           $REGION \
             --platform         managed \
             --allow-unauthenticated \
-            --set-env-vars     GCP_PROJECT=${{ secrets.GCP_PROJECT_ID }},USE_SECRET_MANAGER=true \
+            --set-env-vars     GCP_PROJECT=${{ secrets.GCP_PROJECT_ID }},USE_SECRET_MANAGER=true,FIRESTORE_PROJECT=cfm-qbo-mcp \
             --set-secrets      MCP_API_KEY=mcp-api-key:latest,FRONT_API_TOKEN=front-api-token:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest,INBOX_IDS=inbox-ids:latest,TEAMMATE_IDS=teammate-ids:latest \
             --service-account  ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }} \
             --memory           512Mi \
