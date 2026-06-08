@@ -40,7 +40,10 @@ _client: Optional[firestore.Client] = None
 def _db() -> firestore.Client:
     global _client
     if _client is None:
-        _client = firestore.Client(project=os.environ.get("GCP_PROJECT") or None)
+        project = (os.environ.get("FIRESTORE_PROJECT")
+                   or os.environ.get("GCP_PROJECT")
+                   or None)
+        _client = firestore.Client(project=project)
     return _client
 
 
