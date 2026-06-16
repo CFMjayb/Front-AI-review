@@ -80,12 +80,15 @@ jobs:
             --image   $IMAGE:${{ github.sha }} \
             --region  $REGION
 
-      # ── Update chief-of-staff briefing job image ─────────────────────────────
+      # ── Update chief-of-staff briefing job image + transport config ────────────
       - name: Update briefing job
         run: |
           gcloud run jobs update edom-briefing \
-            --image   $IMAGE:${{ github.sha }} \
-            --region  $REGION
+            --image            $IMAGE:${{ github.sha }} \
+            --region           $REGION \
+            --update-env-vars  SENDER_TRANSPORT=http,EMAIL_MCP_URL=https://email-mcp-server-xltaug3m6q-ue.a.run.app/api/send-email \
+            --remove-env-vars  SENDER_FRONT_CHANNEL_ID \
+            --update-secrets   EMAIL_MCP_API_KEY=email-mcp-api-key:latest
 
       # ── Smoke test ───────────────────────────────────────────────────────────
       - name: Smoke test

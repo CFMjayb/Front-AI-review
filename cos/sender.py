@@ -13,6 +13,7 @@ import html
 import logging
 import os
 import re
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,28 @@ def _send_front(*, subject: str, body_md: str, to: list[str]) -> dict:
             "id": result.get("id") if isinstance(result, dict) else None}
 
 
-_TRANSPORTS = {"front": _send_front}
+def _send_http(*, subject: str, body_md: str, to: list[str]) -> dict:
+    url = os.environ.get("EMAIL_MCP_URL", "").strip()
+    key = os.environ.get("EMAIL_MCP_API_KEY", "").strip()
+    if not url:
+        raise SendError("EMAIL_MCP_URL not set.")
+    if not key:
+        raise SendError("EMAIL_MCP_API_KEY not set.")
+    resp = requests.post(
+        url,
+        headers={"X-API-Key": key, "Content-Type": "application/json"},
+        json={"to": ", ".join(to), "subject": subject,
+              "body_html": to_html(body_md), "body_text": body_md},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    if result.get("status") != "sent":
+        raise SendError(f"Email server returned unexpected response: {result}")
+    return {"transport": "http", "url": url, "to": to}
+
+
+_TRANSPORTS = {"front": _send_front, "http": _send_http}
 
 
 def register_transport(name: str, fn) -> None:
