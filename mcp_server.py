@@ -3,6 +3,7 @@
 HTTP mode (Cloud Run, default): python mcp_server.py
 Stdio mode (local dev):         TRANSPORT=stdio python mcp_server.py
 """
+import asyncio
 import datetime
 import os
 import re
@@ -500,6 +501,22 @@ async def cos_save_guidance(request: Request):
         return JSONResponse({"status": "ok", "upserted": upserted, "deleted": deleted})
     except Exception as exc:
         logger.exception("POST /api/cos/guidance-save failed")
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/cos/briefing", methods=["POST"])
+async def cos_send_briefing(request: Request):
+    try:
+        from cos.briefing import run_briefing
+        result = await asyncio.get_event_loop().run_in_executor(None, run_briefing)
+        return JSONResponse({
+            "status": "ok",
+            "subject": result.get("subject", ""),
+            "transport": result.get("transport", ""),
+            "counts": result.get("counts", {}),
+        })
+    except Exception as exc:
+        logger.exception("POST /api/cos/briefing failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
