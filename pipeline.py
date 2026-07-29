@@ -191,7 +191,8 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
         if plaud_extract.is_plaud_email(conv, messages):
             logger.info(f"[plaud] {cid} — extracting action items")
             try:
-                action_items = plaud_extract.extract_action_items(conv, messages, claude, front)
+                action_items, plaud_cost = plaud_extract.extract_action_items(conv, messages, claude, front)
+                cost += plaud_cost
                 from cos import ledger as _ledger
                 loops = plaud_extract.create_loops(
                     conv, messages, action_items, _ledger,
@@ -207,7 +208,7 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
             return {
                 "conversation_id": cid, "subject": conv.get("subject"),
                 "duration_s": time.time() - started,
-                "cost_usd": getattr(claude, "_last_cost_usd", 0.0),
+                "cost_usd": cost,
                 "errored": "plaud_error" in module_results,
                 "modules": module_results,
             }

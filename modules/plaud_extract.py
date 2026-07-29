@@ -8,15 +8,13 @@ thread itself does NOT become a loop.
 Detection: sender domain ends with plaud.ai (covers noreply@plaud.ai, etc.).
 """
 import logging
-import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 _PLAUD_DOMAIN = "plaud.ai"
 
-_EXTRACT_PROMPT = """\
-You are reading a meeting summary email sent by Plaud.ai. Your job is to extract
+_SYSTEM_PROMPT = """You are reading a meeting summary email sent by Plaud.ai. Your job is to extract
 every discrete action item from the notes.
 
 Rules:
@@ -29,11 +27,6 @@ Rules:
 
 Format each item as:
 {"action": "...", "assignee": "...", "context": "..."}
-
-Meeting notes follow:
----
-{body}
----
 
 Return only the JSON array, no other text."""
 
@@ -64,30 +57,31 @@ def _get_body(messages: list[dict], front_client) -> str:
 
 
 def extract_action_items(conv: dict, messages: list[dict],
-                         claude, front_client) -> list[dict]:
-    """Return a list of action-item dicts extracted from the meeting notes."""
+                         claude, front_client) -> tuple[list[dict], float]:
+    """Return (action_item_dicts, cost_usd) extracted from the meeting notes."""
     body = _get_body(messages, front_client)
     if not body.strip():
         logger.warning(f"Plaud extract: no body in {conv.get('id')}")
-        return []
+        return [], 0.0
 
-    prompt = _EXTRACT_PROMPT.format(body=body[:8000])  # cap at 8k chars
+    user_prompt = f"Meeting notes follow:\n---\n{body[:8000]}\n---"  # cap at 8k chars
 
-    try:
-        import json
-        response = claude.complete(prompt, max_tokens=1024)
-        text = (response or "").strip()
-        # Strip markdown fences if present
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        items = json.loads(text)
-        if not isinstance(items, list):
-            raise ValueError("response is not a list")
-        logger.info(f"Plaud extract: {len(items)} action item(s) from {conv.get('id')}")
-        return items
-    except Exception as exc:
-        logger.error(f"Plaud extract: parse failed for {conv.get('id')}: {exc}")
-        return []
+    res = claude.call(
+        system=_SYSTEM_PROMPT,
+        user=user_prompt,
+        model=claude.default_model,
+        max_tokens=1024,
+        json_mode=True,
+        cached_system=True,
+    )
+    cost = res["cost_usd"]
+    items = res["json"]
+    if not isinstance(items, list):
+        logger.error(f"Plaud extract: parse failed for {conv.get('id')}: "
+                     f"{res.get('parse_error') or 'response is not a list'}")
+        return [], cost
+    logger.info(f"Plaud extract: {len(items)} action item(s) from {conv.get('id')}")
+    return items, cost
 
 
 def create_loops(conv: dict, messages: list[dict], action_items: list[dict],
