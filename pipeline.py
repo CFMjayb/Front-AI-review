@@ -193,23 +193,39 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
             try:
                 action_items, plaud_cost = plaud_extract.extract_action_items(conv, messages, claude, front)
                 cost += plaud_cost
+            except Exception as exc:
+                logger.error(f"[plaud] {cid} extraction failed: {exc}")
+                return {
+                    "conversation_id": cid, "subject": conv.get("subject"),
+                    "duration_s": time.time() - started, "cost_usd": cost,
+                    "errored": True, "modules": {"plaud_error": str(exc)},
+                }
+
+            # Tag immediately after the paid extraction succeeds — BEFORE loop
+            # creation — so a downstream Firestore failure can't leave the
+            # conversation untagged and get it re-billed on every pipeline run.
+            if not dry_run:
+                front.add_tag(cid, "AI/meeting-notes")
+                front.add_tag(cid, PROCESSED_TAG)
+            else:
+                logger.info(f"[dry-run] would apply {PROCESSED_TAG} to {cid}")
+
+            try:
                 from cos import ledger as _ledger
                 loops = plaud_extract.create_loops(
                     conv, messages, action_items, _ledger,
                     front_extract.front_source_link, dry_run=dry_run)
-                if not dry_run:
-                    front.add_tag(cid, "AI/meeting-notes")
-                    front.add_tag(cid, PROCESSED_TAG)
                 module_results["plaud"] = {"action_items": len(action_items), "loops": len(loops)}
                 logger.info(f"[plaud] {cid} — {len(loops)} loop(s) created")
             except Exception as exc:
-                logger.error(f"[plaud] {cid} failed: {exc}")
-                module_results["plaud_error"] = str(exc)
+                logger.error(f"[plaud] {cid} loop creation failed: {exc}")
+                module_results["plaud_loop_error"] = str(exc)
+
             return {
                 "conversation_id": cid, "subject": conv.get("subject"),
                 "duration_s": time.time() - started,
                 "cost_usd": cost,
-                "errored": "plaud_error" in module_results,
+                "errored": "plaud_loop_error" in module_results,
                 "modules": module_results,
             }
 
