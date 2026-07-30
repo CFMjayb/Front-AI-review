@@ -89,9 +89,13 @@ def _front_channel_id(front) -> str:
                     "(set SENDER_FRONT_CHANNEL_ID).")
 
 
-def _send_front(*, subject: str, body_md: str, to: list[str]) -> dict:
+def _send_front(*, subject: str, body_md: str, to: list[str],
+                attachments: list[dict] | None = None) -> dict:
     from auth import get_front_api_token
     from front_client import FrontClient
+    if attachments:
+        logger.warning("Front transport does not support attachments yet — "
+                       "%d attachment(s) dropped", len(attachments))
     front = FrontClient(get_front_api_token())
     channel_id = _front_channel_id(front)
     result = front.send_message(channel_id, to=to, subject=subject,
@@ -100,19 +104,23 @@ def _send_front(*, subject: str, body_md: str, to: list[str]) -> dict:
             "id": result.get("id") if isinstance(result, dict) else None}
 
 
-def _send_http(*, subject: str, body_md: str, to: list[str]) -> dict:
+def _send_http(*, subject: str, body_md: str, to: list[str],
+              attachments: list[dict] | None = None) -> dict:
     url = os.environ.get("EMAIL_MCP_URL", "").strip()
     key = os.environ.get("EMAIL_MCP_API_KEY", "").strip()
     if not url:
         raise SendError("EMAIL_MCP_URL not set.")
     if not key:
         raise SendError("EMAIL_MCP_API_KEY not set.")
+    payload = {"to": ", ".join(to), "subject": subject,
+              "body_html": to_html(body_md), "body_text": body_md}
+    if attachments:
+        payload["attachments"] = attachments
     resp = requests.post(
         url,
         headers={"X-API-Key": key, "Content-Type": "application/json"},
-        json={"to": ", ".join(to), "subject": subject,
-              "body_html": to_html(body_md), "body_text": body_md},
-        timeout=30,
+        json=payload,
+        timeout=60,  # bumped from 30s — attachments increase payload size
     )
     resp.raise_for_status()
     result = resp.json()
@@ -134,10 +142,13 @@ def available_transports() -> list[str]:
 
 
 def send(*, subject: str, body_md: str, to: list[str] | None = None,
-         transport: str | None = None) -> dict:
+         transport: str | None = None, attachments: list[dict] | None = None) -> dict:
     """Send an email. body_md is markdown; converted to HTML per transport.
 
     transport defaults to SENDER_TRANSPORT (or 'front'). to defaults to SENDER_TO.
+    attachments: [{"name", "content_type", "content_base64"}, ...] — only the
+    'http' transport (26-122 email server) currently sends these; other
+    transports log a warning and drop them.
     """
     transport = transport or os.environ.get("SENDER_TRANSPORT", "front")
     to = to or _default_to()
@@ -147,5 +158,6 @@ def send(*, subject: str, body_md: str, to: list[str] | None = None,
     if fn is None:
         raise SendError(f"Unknown transport {transport!r}. "
                         f"Available: {available_transports()}")
-    logger.info("Sending %r via %s to %s", subject, transport, ", ".join(to))
-    return fn(subject=subject, body_md=body_md, to=to)
+    logger.info("Sending %r via %s to %s%s", subject, transport, ", ".join(to),
+               f" with {len(attachments)} attachment(s)" if attachments else "")
+    return fn(subject=subject, body_md=body_md, to=to, attachments=attachments)

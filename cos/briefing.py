@@ -196,6 +196,26 @@ def _narrate(sections: dict, claude) -> tuple[str, str]:
         return _narrate(sections, None)
 
 
+def _build_triage_attachment() -> list[dict] | None:
+    """Export the current Triage workbook (same one used for manual review) and
+    return it as a send()-ready attachment. Failure here must never block the
+    briefing email itself — it just goes out without the attachment."""
+    try:
+        import base64
+        from pathlib import Path as _Path
+        from cos_triage_export import export as export_triage
+        path = export_triage()
+        data = _Path(path).read_bytes()
+        return [{
+            "name": _Path(path).name,
+            "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "content_base64": base64.b64encode(data).decode("ascii"),
+        }]
+    except Exception as exc:
+        logger.warning(f"Triage workbook export failed, sending briefing without attachment: {exc}")
+        return None
+
+
 def _deliver(subject: str, body: str, filepath: Path) -> str:
     """Deliver via the reusable sender layer. Default 'file' only persists; set
     BRIEFING_DELIVERY=email to send (transport chosen by SENDER_TRANSPORT)."""
@@ -204,7 +224,8 @@ def _deliver(subject: str, body: str, filepath: Path) -> str:
         return "file"
     try:
         from cos import sender
-        result = sender.send(subject=subject, body_md=body)
+        attachments = _build_triage_attachment()
+        result = sender.send(subject=subject, body_md=body, attachments=attachments)
         return result.get("transport", "email")
     except Exception as exc:
         logger.error("Briefing delivery failed (%s) — brief saved to %s only.",
