@@ -116,6 +116,26 @@ def _sender(msg: dict) -> str:
     return (author.get("email") or author.get("handle") or "").strip().lower()
 
 
+def sender_rule_skip(conv: dict, messages: list[dict]) -> tuple[bool, dict | None, str]:
+    """(should_skip, rule, sender_email). True when a sender_rules lookup for the
+    latest inbound sender says 'exclude' or 'fyi' — cheap enough to check before
+    paying for a Claude review, unlike loop_from_thread's post-analysis version
+    in cos/extract.py (which only downgrades a loop to FYI after the Claude call
+    already happened)."""
+    inbound = [m for m in messages if m.get("is_inbound")]
+    if not inbound:
+        return False, None, ""
+    latest = max(inbound, key=lambda m: m.get("created_at") or 0)
+    sender_email = _sender(latest)
+    if not sender_email:
+        return False, None, ""
+    from cos import extract as cos_extract
+    rule = cos_extract.sender_rule_action(sender_email)
+    if rule and rule.get("action") in ("exclude", "fyi"):
+        return True, rule, sender_email
+    return False, None, sender_email
+
+
 def looks_like_bulk(conv: dict, messages: list[dict]) -> tuple[bool, str | None]:
     """Return (is_bulk, reason). Only obvious marketing-platform / system mail."""
     if os.environ.get("SPAM_PREFILTER", "true").lower() != "true":

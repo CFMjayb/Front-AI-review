@@ -229,6 +229,42 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
                 "modules": module_results,
             }
 
+        # ── Sender-rule pre-filter (skip Claude for known exclude/fyi senders) ──
+        # cos/extract.py's loop_from_thread() applies sender_rules AFTER analysis,
+        # which never actually saves the Claude cost — this checks the same rule
+        # BEFORE paying for a review, for senders explicitly marked exclude/fyi.
+        skip_sr, sr_rule, sr_sender = prefilter.sender_rule_skip(conv, messages)
+        if skip_sr:
+            sr_action = sr_rule.get("action")
+            if not dry_run:
+                if sr_action == "fyi":
+                    inbound = [m for m in messages if m.get("is_inbound")]
+                    latest = max(inbound, key=lambda m: m.get("created_at") or 0)
+                    author = latest.get("author") or {}
+                    from cos import ledger as _ledger
+                    _ledger.upsert_loop(
+                        direction="owed_to_me",
+                        counterparty=author.get("name") or sr_sender,
+                        counterparty_email=sr_sender,
+                        summary=conv.get("subject") or "(no subject)",
+                        channel="front", source_ref=cid,
+                        source_link=front_extract.front_source_link(cid),
+                        category=sr_rule.get("category") or "",
+                        importance=int(sr_rule.get("importance") or 0) or 2,
+                        fyi=True, status="open", action_type="FYI",
+                    )
+                front.add_tag(cid, f"AI/sender-rule-{sr_action}")
+                front.add_tag(cid, PROCESSED_TAG)
+            else:
+                logger.info(f"[dry-run] sender-rule {sr_action}: would skip Claude for {cid} ({sr_sender})")
+            logger.info(f"[sender-rule] {cid} skipped AI review — {sr_action} ({sr_sender})")
+            return {
+                "conversation_id": cid, "subject": conv.get("subject"),
+                "duration_s": time.time() - started, "cost_usd": 0.0,
+                "errored": False, "prefiltered": True,
+                "modules": {"sender_rule": {"action": sr_action, "sender": sr_sender}},
+            }
+
         # ── Standard pre-filter (bulk / calendar) ────────────────────────────
         # Cheap, AI-free: skip Claude review for marketing/bounce mail and
         # calendar meeting-response notifications (Accepted/Declined/Tentative).

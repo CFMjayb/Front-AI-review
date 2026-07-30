@@ -75,6 +75,16 @@ def _sender_forces_fyi_fallback(sender_email: str) -> bool:
     return any(domain == d or domain.endswith("." + d) for d in _FALLBACK_FYI_DOMAINS)
 
 
+def sender_rule_action(sender_email: str) -> Optional[dict]:
+    """Public lookup for callers that need to check a sender rule BEFORE paying
+    for a Claude review — loop_from_thread (below) only applies rules AFTER
+    analysis, which never actually saves the Claude cost for exclude/fyi senders."""
+    rule = _get_sender_rule(sender_email)
+    if rule is None and _sender_forces_fyi_fallback(sender_email):
+        rule = {"action": "fyi"}
+    return rule
+
+
 
 def quiet_threshold_hours() -> float:
     return float(os.environ.get("QUIET_THRESHOLD_HOURS", "36"))
