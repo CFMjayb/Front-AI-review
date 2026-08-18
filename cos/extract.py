@@ -115,9 +115,11 @@ def make_message(*, inbound: bool, ts_epoch: float = 0, sender_name: str = "",
 
 
 def build_thread(*, channel: str, source_ref: str, subject: str = "",
-                 source_link: str = "", messages: list[dict]) -> dict:
+                 source_link: str = "", messages: list[dict],
+                 mailbox: str = "") -> dict:
     return {"channel": channel, "source_ref": source_ref, "subject": subject,
-            "source_link": source_link, "messages": messages}
+            "source_link": source_link, "messages": messages,
+            "mailbox": mailbox}
 
 
 def last_message(thread: dict) -> dict | None:
@@ -189,6 +191,7 @@ def loop_from_thread(thread: dict, analysis: dict, *, dry_run: bool = False) -> 
         sentiment=analysis.get("sentiment") or "",
         escalation_risk=float(analysis.get("escalation_risk") or 0.0),
         suggested_assignee=analysis.get("suggested_assignee") or "",
+        mailbox=thread.get("mailbox") or "",
     )
 
     if inbound:

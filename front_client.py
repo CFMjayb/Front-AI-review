@@ -18,6 +18,21 @@ BASE_URL = "https://api2.frontapp.com"
 PROCESSED_TAG = "AI/processed"
 
 
+def _num_header(value, default):
+    """Parse a numeric Front header defensively.
+
+    Front documents these as integers but sends fractional values in practice —
+    x-ratelimit-reset arrives as an epoch like "1787064542.997". A bare int() on
+    that raises ValueError from inside the rate-limit handler, which turns a
+    routine throttle into a failed request. Seen live 2026-08-18 during the
+    mailbox backfill.
+    """
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
 class FrontApiError(RuntimeError):
     def __init__(self, status: Optional[int], message: str) -> None:
         self.status = status
@@ -69,7 +84,7 @@ def _request(method: str, path_or_url: str, token: str, body: Optional[dict] = N
                 msg = "Front returned 403 (token may be missing required scope)."
             raise FrontApiError(403, f"{msg} Body: {detail!r}" if detail else msg) from exc
         if exc.code == 429:
-            retry_after = int(exc.headers.get("Retry-After", "5"))
+            retry_after = _num_header(exc.headers.get("Retry-After"), 5)
             time.sleep(retry_after)
             raise FrontApiError(429, f"Front rate limit hit. Waited {retry_after}s.") from exc
         raise FrontApiError(exc.code, f"Front {exc.code}: {body_text[:500]}") from exc
@@ -117,7 +132,8 @@ def _collect_pages(path: str, token: str, *, limit: int = 50, max_pages: int = 5
 
         remaining = headers.get("x-ratelimit-remaining")
         if remaining == "0":
-            reset = int(headers.get("x-ratelimit-reset", "0") or "0")
+            # Front sends this as a fractional epoch (e.g. "1787064542.997").
+            reset = _num_header(headers.get("x-ratelimit-reset"), 0)
             sleep_for = max(0, reset - int(time.time()))
             if sleep_for:
                 logger.info(f"Front rate limit, sleeping {sleep_for}s")
@@ -178,6 +194,12 @@ class FrontClient:
     def get_conversation_messages(self, conversation_id: str, *, max_pages: int = 10) -> list[dict]:
         return _collect_pages(f"/conversations/{conversation_id}/messages", self.token,
                               limit=50, max_pages=max_pages)
+
+    def list_conversation_inboxes(self, conversation_id: str) -> list[dict]:
+        """Inboxes a conversation belongs to. The authoritative mailbox
+        attribution — the conversation object itself carries no inbox field."""
+        return _collect_pages(f"/conversations/{conversation_id}/inboxes", self.token,
+                              limit=50, max_pages=2)
 
     def list_conversation_tags(self, conversation_id: str) -> list[dict]:
         data, _ = _request("GET", f"/conversations/{conversation_id}", self.token)

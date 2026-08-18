@@ -17,7 +17,7 @@ import os
 import time
 from pathlib import Path
 
-from cos import ledger
+from cos import ledger, mailboxes
 
 logger = logging.getLogger(__name__)
 
@@ -61,23 +61,51 @@ def _brief_sort(loops: list[dict]) -> list[dict]:
     ))
 
 
-def gather() -> dict:
-    """Pull the day's sections from the ledger (resolved loops already excluded)."""
+def gather(*, mailbox: str = "", include_calendar: bool = True) -> dict:
+    """Pull the day's sections from the ledger (resolved loops already excluded).
+
+    mailbox="" is every loop, unsplit — the shape the subject line and the
+    run_briefing counts are built from. Pass a mailbox key for one mailbox's
+    block; the calendar is shared across mailboxes rather than repeated, so
+    per-mailbox calls pass include_calendar=False.
+    """
     from cos import calendars
-    i_owe  = [l for l in ledger.list_loops(direction="i_owe")       if not _is_active_snooze(l)]
+    i_owe  = [l for l in ledger.list_loops(direction="i_owe", mailbox=mailbox)
+              if not _is_active_snooze(l)]
     on_you = _brief_sort([l for l in i_owe if not l.get("fyi")])
     fyi    = [l for l in i_owe if l.get("fyi")]
     waiting = _brief_sort(
-        [l for l in ledger.list_loops(direction="owed_to_me") if not _is_active_snooze(l)])
-    overdue = [l for l in ledger.list_loops(overdue_only=True)
+        [l for l in ledger.list_loops(direction="owed_to_me", mailbox=mailbox)
+         if not _is_active_snooze(l)])
+    overdue = [l for l in ledger.list_loops(overdue_only=True, mailbox=mailbox)
                if not _is_active_snooze(l) and not l.get("fyi")]
     new_recent = [l for l in (on_you + waiting)
                   if l["channel"] != "calendar" and _hours_ago(l.get("first_seen")) <= 24]
-    events = calendars.events_for_day()
-    return {"on_you": on_you, "fyi": fyi, "waiting": waiting, "overdue": overdue,
-            "new": new_recent, "events": events,
-            "conflicts": sorted(calendars.detect_conflicts(events)),
-            "attached": calendars.attach_loops(events), "stats": ledger.stats()}
+    out = {"on_you": on_you, "fyi": fyi, "waiting": waiting, "overdue": overdue,
+           "new": new_recent, "events": [], "conflicts": [], "attached": {}}
+    if include_calendar:
+        events = calendars.events_for_day()
+        out.update({"events": events,
+                    "conflicts": sorted(calendars.detect_conflicts(events)),
+                    "attached": calendars.attach_loops(events),
+                    "stats": ledger.stats()})
+    return out
+
+
+def gather_by_mailbox() -> list[tuple[str, dict]]:
+    """One (mailbox_key, sections) pair per mailbox that has anything to show.
+
+    Registered mailboxes always appear, so the email keeps a stable shape day to
+    day. The Unattributed bucket appears only when it is non-empty.
+    """
+    out: list[tuple[str, dict]] = []
+    for mb in mailboxes.mailboxes(include_unassigned=True):
+        sections = gather(mailbox=mb["key"], include_calendar=False)
+        has_any = any(sections[k] for k in ("on_you", "waiting", "new", "fyi"))
+        if mb["key"] == mailboxes.UNASSIGNED and not has_any:
+            continue
+        out.append((mb["key"], sections))
+    return out
 
 
 _URGENCY_EMOJI = {"urgent": "🔴", "high": "🟠", "normal": "🟡", "low": "⚪"}
@@ -174,6 +202,95 @@ def render(sections: dict, *, date: str = "", headline: str = "", closing: str =
     return subject, "\n".join(lines)
 
 
+def _mailbox_block(key: str, sections: dict) -> list[str]:
+    """One mailbox's section of the email. Headings are one level deeper than the
+    mailbox heading itself so the mailbox stays the visual unit."""
+    mb = mailboxes.by_key(key) or {}
+    label = mb.get("label") or mailboxes.UNASSIGNED_LABEL
+    address = mb.get("address") or ""
+    on_you, waiting = sections["on_you"], sections["waiting"]
+    fyi, new = sections.get("fyi", []), sections.get("new", [])
+
+    head = f"## 📬 {label}"
+    if address:
+        head += f" — {address}"
+    head += f" · {len(on_you)} on you · {len(waiting)} waiting"
+    lines = [head, ""]
+
+    lines.append(f"### 🔴 On you ({len(on_you)})")
+    lines += [f"- {_loop_line(l)}" for l in on_you] or ["_Nothing on you here._"]
+    lines.append("")
+
+    lines.append(f"### ⏳ Waiting on others — quiet 36 h+ ({len(waiting)})")
+    lines += [f"- {_loop_line(l)}" for l in waiting] or ["_Nothing outstanding._"]
+    lines.append("")
+
+    if new:
+        lines.append(f"### 🆕 New since yesterday ({len(new)})")
+        lines += [f"- {_loop_line(l)}" for l in new]
+        lines.append("")
+
+    if fyi:
+        lines.append(f"### 📋 FYI — auto-clears in 24h ({len(fyi)})")
+        lines += [f"- {_loop_line(l)}" for l in fyi]
+        lines.append("")
+
+    return lines
+
+
+def render_all(per_mailbox: list[tuple[str, dict]], shared: dict, *,
+               date: str = "", headline: str = "", closing: str = "",
+               filtered_count: int | None = None) -> tuple[str, str]:
+    """Render the morning email with one section per mailbox.
+
+    per_mailbox comes from gather_by_mailbox(); shared carries the calendar and
+    the all-mailbox totals used in the subject line.
+    """
+    date = date or datetime.date.today().isoformat()
+    on_you_total = len(shared["on_you"])
+    waiting_total = len(shared["waiting"])
+    events = shared.get("events", [])
+    subject = (f"☀️ Your day — {date} · {on_you_total} on you · "
+               f"{waiting_total} waiting · {len(events)} meetings")
+
+    lines = [f"# Your day — {date}", ""]
+    if headline:
+        lines += [headline, ""]
+
+    # One-line index so the mailbox split is visible before scrolling.
+    if len(per_mailbox) > 1:
+        bits = [f"**{mailboxes.label_for(k)}** {len(sec['on_you'])}/{len(sec['waiting'])}"
+                for k, sec in per_mailbox]
+        lines += ["_On you / waiting by mailbox:_ " + "  ·  ".join(bits), ""]
+
+    # Calendar is shared — the day has one schedule, not one per mailbox.
+    if events:
+        conflicts = set(shared.get("conflicts", []))
+        attached = shared.get("attached", {})
+        lines.append(f"## 📅 Today ({len(events)})")
+        for ev in events:
+            lines.append(_event_line(ev, conflict=ev["id"] in conflicts))
+            for loop in attached.get(ev["id"], []):
+                lines.append(f"    - ↳ prep: you owe **{loop['counterparty']}** — {loop['summary']}")
+        if conflicts:
+            lines.append(f"- ⚠️ {len(conflicts)} meeting(s) overlap — check your schedule.")
+        lines.append("")
+
+    for key, sections in per_mailbox:
+        lines += _mailbox_block(key, sections)
+
+    if filtered_count is not None:
+        lines += [f"## 🗑️ Filtered", "",
+                  f"**{filtered_count}** marketing / spam / unsolicited set aside.", ""]
+
+    if closing:
+        lines += ["---", "", closing, "", "— Your chief of staff"]
+    else:
+        lines += ["— Your chief of staff"]
+
+    return subject, "\n".join(lines)
+
+
 def _narrate(sections: dict, claude) -> tuple[str, str]:
     """Optional warm headline + closing via Claude. Falls back to templated text."""
     on_you, waiting = sections["on_you"], sections["waiting"]
@@ -196,24 +313,39 @@ def _narrate(sections: dict, claude) -> tuple[str, str]:
         return _narrate(sections, None)
 
 
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 def _build_triage_attachment() -> list[dict] | None:
-    """Export the current Triage workbook (same one used for manual review) and
-    return it as a send()-ready attachment. Failure here must never block the
-    briefing email itself — it just goes out without the attachment."""
+    """Export the Triage workbooks (same ones used for manual review) — one per
+    mailbox — and return them as send()-ready attachments.
+
+    Failure here must never block the briefing email itself; it just goes out
+    with fewer attachments, or none. A single mailbox failing to export does not
+    cost the others their workbook.
+    """
     try:
         import base64
         from pathlib import Path as _Path
-        from cos_triage_export import export as export_triage
-        path = export_triage()
-        data = _Path(path).read_bytes()
-        return [{
-            "name": _Path(path).name,
-            "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "content_base64": base64.b64encode(data).decode("ascii"),
-        }]
+        from cos_triage_export import export_all
+        written = export_all()
     except Exception as exc:
-        logger.warning(f"Triage workbook export failed, sending briefing without attachment: {exc}")
+        logger.warning("Triage workbook export failed, sending briefing without "
+                       "attachments: %s", exc)
         return None
+
+    attachments: list[dict] = []
+    for key, path in written:
+        try:
+            data = _Path(path).read_bytes()
+            attachments.append({
+                "name": _Path(path).name,
+                "content_type": _XLSX_MIME,
+                "content_base64": base64.b64encode(data).decode("ascii"),
+            })
+        except Exception as exc:
+            logger.warning("Could not attach %s workbook (%s): %s", key, path, exc)
+    return attachments or None
 
 
 def _deliver(subject: str, body: str, filepath: Path) -> str:
@@ -247,11 +379,21 @@ def run_briefing(*, claude=None, filtered_count: int | None = None,
     except Exception as exc:
         logger.warning(f"FYI auto-expire failed: {exc}")
 
+    # `sections` stays the all-mailbox view: it drives the narrator, the subject
+    # line totals, and the returned counts. The per-mailbox split is layered on
+    # top rather than replacing it.
     sections = gather()
     headline, closing = _narrate(sections, claude)
     date = calendars.local_today().isoformat()
-    subject, body = render(sections, date=date, headline=headline, closing=closing,
-                           filtered_count=filtered_count)
+
+    per_mailbox = gather_by_mailbox()
+    if len(per_mailbox) > 1:
+        subject, body = render_all(per_mailbox, sections, date=date, headline=headline,
+                                   closing=closing, filtered_count=filtered_count)
+    else:
+        # One mailbox (or none registered) — a split adds nothing but a heading.
+        subject, body = render(sections, date=date, headline=headline, closing=closing,
+                               filtered_count=filtered_count)
 
     BRIEF_DIR.mkdir(parents=True, exist_ok=True)
     filepath = BRIEF_DIR / f"{date}.md"
@@ -260,7 +402,11 @@ def run_briefing(*, claude=None, filtered_count: int | None = None,
     transport = _deliver(subject, body, filepath) if deliver else "skipped"
     logger.info(f"Briefing written to {filepath} (delivery: {transport})")
     return {"file": str(filepath), "subject": subject, "transport": transport,
-            "counts": {k: len(v) for k, v in sections.items() if isinstance(v, list)}}
+            "counts": {k: len(v) for k, v in sections.items() if isinstance(v, list)},
+            "by_mailbox": {k: {"on_you": len(sec["on_you"]),
+                               "waiting": len(sec["waiting"]),
+                               "fyi": len(sec.get("fyi", []))}
+                           for k, sec in per_mailbox}}
 
 
 def main() -> None:

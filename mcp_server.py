@@ -253,6 +253,7 @@ def _loop_to_tsv_row(loop, row_type):
         _date_str(loop.get("source_date")),
         sent_display,
         _tsv_safe(loop.get("source_link")),
+        _tsv_safe(loop.get("mailbox") or "other"),
     ])
 
 
@@ -291,18 +292,31 @@ def _front_archive(loop_rec):
 
 @mcp.custom_route("/api/cos/loops", methods=["GET"])
 async def cos_get_loops(request: Request):
+    """?mailbox=<key> scopes to one mailbox (see cos/mailboxes.py).
+
+    Omitted means every mailbox, unchanged from before the split — the Triage
+    Workbook keeps working without a rebuild. `mailbox` is also appended as a
+    column so a caller pulling everything can still tell them apart.
+    """
     try:
         ldr = _cos_ledger()
-        active   = sorted(ldr.list_loops(), key=_loop_sort_key)
-        deferred = ldr.list_loops(deferred_only=True)
+        mailbox = (request.query_params.get("mailbox") or "").strip().lower()
+        if mailbox:
+            from cos import mailboxes as _mb
+            if not _mb.by_key(mailbox):
+                return JSONResponse(
+                    {"error": f"unknown mailbox {mailbox!r}",
+                     "known": _mb.keys(include_unassigned=True)}, status_code=400)
+        active   = sorted(ldr.list_loops(mailbox=mailbox), key=_loop_sort_key)
+        deferred = ldr.list_loops(deferred_only=True, mailbox=mailbox)
         header = ("id\tnum\trow_type\turgency\tdirection\tdir_label\t"
                   "action_type\tcounterparty\tsummary\tcategory\t"
-                  "age_days\tdue_at\tsource_date\tsentiment_display\tsource_link")
+                  "age_days\tdue_at\tsource_date\tsentiment_display\tsource_link\tmailbox")
         rows = [header]
         for loop in active:
             rows.append(_loop_to_tsv_row(loop, "active"))
         if deferred:
-            rows.append("\t\tdivider\t\t\t\t\t\t\t\t\t\t\t\t")
+            rows.append("\t\tdivider\t\t\t\t\t\t\t\t\t\t\t\t\t")
             for loop in deferred:
                 rows.append(_loop_to_tsv_row(loop, "deferred"))
         from starlette.responses import PlainTextResponse

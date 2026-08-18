@@ -58,12 +58,17 @@ def _normalize(messages: list[dict]) -> list[dict]:
 
 
 def extract_from_analysis(conv: dict, messages: list[dict], analysis: dict,
-                          *, dry_run: bool = False) -> dict | None:
-    """Turn a Front conversation's existing analysis into a loop (or None)."""
+                          *, dry_run: bool = False, mailbox: str = "") -> dict | None:
+    """Turn a Front conversation's existing analysis into a loop (or None).
+
+    mailbox: the registry key for the Front inbox this conversation came from
+    (see cos/mailboxes.py). Blank means unattributed rather than wrong.
+    """
     conv_id = conv.get("id")
     thread = extract.build_thread(
         channel="front", source_ref=conv_id, subject=conv.get("subject") or "",
-        source_link=front_source_link(conv_id), messages=_normalize(messages))
+        source_link=front_source_link(conv_id), messages=_normalize(messages),
+        mailbox=mailbox)
     return extract.loop_from_thread(thread, analysis, dry_run=dry_run)
 
 

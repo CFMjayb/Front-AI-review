@@ -125,17 +125,37 @@ def _parse_snooze_until(value: str) -> str | None:
     return None
 
 
-def _find_latest_export() -> Path | None:
+_TS_RE = re.compile(r"CoS Triage (\d{4}-\d{2}-\d{2}(?: \d{2}-\d{2})?)")
+
+
+def _find_latest_exports() -> list[Path]:
+    """Every workbook in the most recent export batch, newest batch first.
+
+    The export writes one workbook per mailbox — "CoS Triage <ts> - <Mailbox>.xlsx"
+    — with a shared timestamp. All files carrying the newest timestamp are one
+    batch and must all be imported, or a mailbox's edits are silently discarded.
+    Older single-file exports (no mailbox suffix) still match and still work.
+    """
     triage_dir = Path(__file__).parent / "data" / "triage"
     if not triage_dir.exists():
-        return None
-    # Match date-stamped files: "CoS Triage YYYY-MM-DD.xlsx" (old) or
-    # "CoS Triage YYYY-MM-DD HH-MM.xlsx" (new).  Excludes test/scratch files.
+        return []
     dated = sorted(
         triage_dir.glob("CoS Triage [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*.xlsx"),
-        reverse=True
-    )
-    return dated[0] if dated else None
+        reverse=True)
+    dated = [p for p in dated if not p.name.startswith("~$")]  # Excel lock files
+    if not dated:
+        return []
+    stamped = [(m.group(1), p) for p in dated if (m := _TS_RE.match(p.name))]
+    if not stamped:
+        return [dated[0]]
+    newest_ts = stamped[0][0]          # dated is already newest-first
+    return sorted(p for ts, p in stamped if ts == newest_ts)
+
+
+def _find_latest_export() -> Path | None:
+    """Back-compat single-file accessor."""
+    batch = _find_latest_exports()
+    return batch[0] if batch else None
 
 
 def _col_index(headers: list[str], name: str) -> int | None:
@@ -367,12 +387,33 @@ def run_import(xlsx_path: str | None = None) -> dict:
 
 
 def _run_all_imports(xlsx_path: str | None = None) -> dict:
+    """Import one file, or — given no path — every file in the latest batch."""
     if not xlsx_path:
-        latest = _find_latest_export()
-        if not latest:
+        batch = _find_latest_exports()
+        if not batch:
             raise FileNotFoundError("No triage file found in data/triage/. Run export first.")
-        xlsx_path = str(latest)
+        if len(batch) > 1:
+            print(f"Latest batch has {len(batch)} mailbox workbooks:")
+            for b in batch:
+                print(f"  - {b.name}")
+            totals = {"done": 0, "dropped": 0, "snoozed": 0}
+            per_file = []
+            for b in batch:
+                r = _run_one_file(str(b))
+                per_file.append({"file": b.name, **r})
+                for k in totals:
+                    totals[k] += r.get(k, 0) or 0
+            remaining = len(ledger.list_loops())
+            print(f"\nBatch totals: Done: {totals['done']}  "
+                  f"Dropped: {totals['dropped']}  Snoozed: {totals['snoozed']}")
+            print(f"Active loops remaining in Firestore: {remaining}")
+            return {**totals, "files": per_file}
+        xlsx_path = str(batch[0])
 
+    return _run_one_file(xlsx_path)
+
+
+def _run_one_file(xlsx_path: str) -> dict:
     print(f"Reading: {xlsx_path}")
     wb = openpyxl.load_workbook(xlsx_path)
 

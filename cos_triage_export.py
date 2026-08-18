@@ -1,10 +1,17 @@
-"""Export active CoS loops to an Excel triage spreadsheet.
+"""Export active CoS loops to Excel triage spreadsheets — one per mailbox.
 
 Usage:
-    python cos_triage_export.py [output_path]
+    python cos_triage_export.py                 # one workbook per mailbox
+    python cos_triage_export.py <output_path>   # single workbook, all mailboxes
+    python cos_triage_export.py --mailbox cfm [<output_path>]
 
-If output_path is omitted, writes to:
-    data/triage/CoS Triage YYYY-MM-DD.xlsx
+One mailbox = one workbook, so each inbox is triaged on its own. The mailbox list
+lives in cos/mailboxes.py; loops that belong to no registered mailbox go to an
+"Unattributed" workbook, and only when there are any.
+
+Default output (timestamp shared across a batch, so the importer can find them
+as a set):
+    data/triage/CoS Triage YYYY-MM-DD HH-MM - <Mailbox>.xlsx
 
 Columns (research-backed layout — GTD next-actions + Eisenhower matrix):
     #             Stable loop number
@@ -34,7 +41,7 @@ os.environ.setdefault("GCP_PROJECT", os.environ.get("GCP_PROJECT", "cfm-front-ma
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env", override=True)
 
-from cos import ledger
+from cos import ledger, mailboxes
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -139,21 +146,29 @@ def _sort_key(loop: dict) -> tuple:
     return (urg_order, dir_order, age_key, 0)
 
 
-def export(output_path: str | None = None) -> str:
+def export(output_path: str | None = None, *, mailbox: str = "",
+           timestamp: str = "") -> str:
+    """Write one triage workbook. mailbox="" means every loop, unsplit."""
     now       = _local_now()
     today     = now.date()
     today_str = today.isoformat()
+    mb_label  = mailboxes.label_for(mailbox) if mailbox else "All mailboxes"
 
     if not output_path:
         out_dir = Path(__file__).parent / "data" / "triage"
         out_dir.mkdir(parents=True, exist_ok=True)
         # Include time so multiple same-day exports don't overwrite each other
         # and so a locked file (Excel open) generates a fresh name automatically.
-        ts = now.strftime("%Y-%m-%d %H-%M")
-        output_path = str(out_dir / f"CoS Triage {ts}.xlsx")
+        # The timestamp is passed in by export_all() so every workbook in one
+        # batch shares it — that's what lets the importer treat them as a set.
+        # Date stays immediately after "CoS Triage " so the importer's existing
+        # date glob still matches.
+        ts = timestamp or now.strftime("%Y-%m-%d %H-%M")
+        suffix = f" - {mailboxes.slug(mailbox)}" if mailbox else ""
+        output_path = str(out_dir / f"CoS Triage {ts}{suffix}.xlsx")
 
-    loops    = ledger.list_loops()
-    deferred = ledger.list_loops(deferred_only=True)
+    loops    = ledger.list_loops(mailbox=mailbox)
+    deferred = ledger.list_loops(deferred_only=True, mailbox=mailbox)
 
     loops.sort(key=_sort_key)
 
@@ -276,18 +291,22 @@ def export(output_path: str | None = None) -> str:
             next_row += 1
 
     # ── Triage Action dropdown ────────────────────────────────────────────────
+    # Only when there is at least one data row: a mailbox with nothing open
+    # yields total_rows == 1, and "M2:M1" is an invalid range openpyxl rejects.
+    # (Latent before the mailbox split, when there was always ≥1 loop.)
     action_col  = _COL["Triage Action"]
     total_rows  = next_row - 1
-    dv = DataValidation(
-        type="list",
-        formula1='"done,drop,exclude,subscribe,fyi,defer,'
-                 'snooze 1d,snooze 3d,snooze 1w,snooze 2w,snooze 1m"',
-        allow_blank=True,
-        showDropDown=False,
-    )
-    dv.sqref = (f"{get_column_letter(action_col)}2:"
-                f"{get_column_letter(action_col)}{total_rows}")
-    ws.add_data_validation(dv)
+    if total_rows >= 2:
+        dv = DataValidation(
+            type="list",
+            formula1='"done,drop,exclude,subscribe,fyi,defer,'
+                     'snooze 1d,snooze 3d,snooze 1w,snooze 2w,snooze 1m"',
+            allow_blank=True,
+            showDropDown=False,
+        )
+        dv.sqref = (f"{get_column_letter(action_col)}2:"
+                    f"{get_column_letter(action_col)}{total_rows}")
+        ws.add_data_validation(dv)
 
     # ── Column widths + hide _id ──────────────────────────────────────────────
     for col_idx, (name, width) in enumerate(COLS, start=1):
@@ -305,10 +324,14 @@ def export(output_path: str | None = None) -> str:
     # ── Instructions sheet ────────────────────────────────────────────────────
     info = wb.create_sheet("Instructions")
     instructions = [
-        ("CoS Triage Spreadsheet", True),
+        (f"CoS Triage Spreadsheet — {mb_label}", True),
         ("", False),
         (f"Generated: {today_str}  |  "
          f"{len(loops)} active + {len(deferred)} deferred loops", False),
+        (f"Mailbox: {mb_label}"
+         + (f"  <{mailboxes.address_for(mailbox)}>" if mailbox and
+            mailboxes.address_for(mailbox) else "")
+         + ("  — this workbook covers ONLY this mailbox." if mailbox else ""), False),
         ("", False),
         ("COLOUR KEY:", True),
         ("  Rows are coloured by urgency × direction:", False),
@@ -364,8 +387,28 @@ def export(output_path: str | None = None) -> str:
         print(f"\nERROR: Cannot write to:\n  {output_path}\n"
               "The file may be open in Excel. Close it and try again.")
         sys.exit(1)
-    print(f"Exported {len(loops)} active + {len(deferred)} deferred -> {output_path}")
+    print(f"Exported {len(loops)} active + {len(deferred)} deferred "
+          f"[{mb_label}] -> {output_path}")
     return output_path
+
+
+def export_all(*, include_empty: bool = True) -> list[tuple[str, str]]:
+    """Write one workbook per mailbox. Returns [(mailbox_key, path), ...].
+
+    include_empty keeps a registered mailbox's workbook even with zero loops, so
+    the morning email always has the same shape. The Unattributed bucket is the
+    exception — it only appears when something actually landed in it, since an
+    empty one is just noise.
+    """
+    ts = _local_now().strftime("%Y-%m-%d %H-%M")
+    written: list[tuple[str, str]] = []
+    for mb in mailboxes.mailboxes(include_unassigned=True):
+        key = mb["key"]
+        n = len(ledger.list_loops(mailbox=key))
+        if n == 0 and (key == mailboxes.UNASSIGNED or not include_empty):
+            continue
+        written.append((key, export(mailbox=key, timestamp=ts)))
+    return written
 
 
 def _write_sender_rules_sheet(wb: openpyxl.Workbook) -> None:
@@ -523,5 +566,18 @@ def _write_guidance_sheet(wb: openpyxl.Workbook) -> None:
 
 
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else None
-    export(path)
+    args = sys.argv[1:]
+    mailbox = ""
+    if "--mailbox" in args:
+        i = args.index("--mailbox")
+        mailbox = args[i + 1] if i + 1 < len(args) else ""
+        del args[i:i + 2]
+        if mailbox and not mailboxes.by_key(mailbox):
+            sys.exit(f"Unknown mailbox {mailbox!r}. "
+                     f"Known: {', '.join(mailboxes.keys(include_unassigned=True))}")
+    path = args[0] if args else None
+    if path or mailbox:
+        export(path, mailbox=mailbox)
+    else:
+        for key, p in export_all():
+            print(f"  {key:10s} {p}")

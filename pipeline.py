@@ -11,11 +11,15 @@ from typing import Optional
 
 from auth import get_anthropic_api_key, get_front_api_token
 from claude_client import ClaudeClient
-from cos import front_extract
+from cos import front_extract, mailboxes
 from front_client import FrontClient, PROCESSED_TAG
 from modules import analyze, m4_cluster, m8_draft, plaud_extract, prefilter
 
 logger = logging.getLogger(__name__)
+
+# Key used to carry mailbox attribution on a conversation dict between fetch and
+# extraction. Underscore-prefixed so it can never collide with a Front API field.
+_MAILBOX_HINT = "_cos_mailbox"
 
 # Front has no literal "open" status — an open conversation is assigned OR
 # unassigned (as opposed to archived / deleted / trashed / spam).
@@ -48,11 +52,20 @@ def _fetch_all_sources(front: FrontClient, since_ms: int) -> list[dict]:
     sources: list[tuple[str, list[dict]]] = []
     max_pages = int(os.environ.get("SOURCE_MAX_PAGES", "5"))
 
-    for inbox_id in [i.strip() for i in os.environ.get("INBOX_IDS", "").split(",") if i.strip()]:
-        sources.append((f"inbox:{inbox_id}", front.list_inbox_conversations(
-            inbox_id, status="open", since_ms=since_ms, max_pages=max_pages)))
+    for inbox_id in mailboxes.scan_inbox_ids():
+        convs = front.list_inbox_conversations(
+            inbox_id, status="open", since_ms=since_ms, max_pages=max_pages)
+        mb = mailboxes.key_for_inbox(inbox_id)
+        for c in convs:
+            # Stamp attribution at the only point it is known for free. Without
+            # this, _dedupe_by_id/_filter_* flatten every source into one list
+            # and which inbox a conversation came from is lost.
+            c.setdefault(_MAILBOX_HINT, mb)
+        sources.append((f"inbox:{inbox_id}[{mb}]", convs))
 
     for tm_id in [t.strip() for t in os.environ.get("TEAMMATE_IDS", "").split(",") if t.strip()]:
+        # Assigned-to-teammate conversations can come from any inbox, so they get
+        # no hint — _mailbox_for() asks Front per conversation instead.
         sources.append((f"assigned:{tm_id}", front.list_assigned_conversations(
             tm_id, status="open", since_ms=since_ms, max_pages=max_pages)))
 
@@ -61,6 +74,25 @@ def _fetch_all_sources(front: FrontClient, since_ms: int) -> list[dict]:
         logger.info(f"Source {name}: {len(convs)} conversations")
         all_convs.extend(convs)
     return all_convs
+
+
+def _mailbox_for(conv: dict, front: FrontClient) -> str:
+    """Mailbox key for a conversation.
+
+    Uses the hint stamped during the inbox fetch when present (free); otherwise
+    asks Front which inbox the conversation lives in (single-conversation mode
+    and the teammate-assigned path have no hint). Never raises — an unknown
+    mailbox is better than a failed conversation.
+    """
+    hint = conv.get(_MAILBOX_HINT)
+    if hint:
+        return hint
+    try:
+        ids = [i.get("id") for i in front.list_conversation_inboxes(conv["id"])]
+        return mailboxes.key_for_inboxes([i for i in ids if i])
+    except Exception as exc:
+        logger.warning(f"mailbox lookup failed for {conv.get('id')}: {exc}")
+        return mailboxes.UNASSIGNED
 
 
 def _dedupe_by_id(conversations: list[dict]) -> list[dict]:
@@ -321,7 +353,8 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
         if result["ok"]:
             try:
                 loop = front_extract.extract_from_analysis(
-                    conv, messages, result["output"], dry_run=dry_run)
+                    conv, messages, result["output"], dry_run=dry_run,
+                    mailbox=_mailbox_for(conv, front))
                 if loop:
                     module_results["loop"] = loop
             except Exception as exc:

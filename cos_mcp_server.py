@@ -74,11 +74,15 @@ async def health(request: Request):
 
 @mcp.tool()
 def cos_list_loops(direction: str = "", channel: str = "", status: str = "",
-                   overdue_only: bool = False, include_resolved: bool = False) -> list:
+                   overdue_only: bool = False, include_resolved: bool = False,
+                   mailbox: str = "") -> list:
     """List open loops. direction: i_owe|owed_to_me. channel: front|outlook|teams|zoom.
-    status: open|waiting|snoozed|done|dropped. Resolved loops hidden unless requested."""
+    status: open|waiting|snoozed|done|dropped. Resolved loops hidden unless requested.
+    mailbox: cfm|edom|other — which mailbox the loop came from (see cos/mailboxes.py);
+    omit for all mailboxes."""
     return ledger.list_loops(direction=direction, channel=channel, status=status,
-                             overdue_only=overdue_only, include_resolved=include_resolved)
+                             overdue_only=overdue_only, include_resolved=include_resolved,
+                             mailbox=mailbox)
 
 
 @mcp.tool()
