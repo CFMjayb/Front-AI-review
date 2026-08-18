@@ -112,12 +112,15 @@ def test_gather_by_mailbox_splits_loops(mods):
 
 
 def test_empty_unassigned_bucket_is_omitted(mods):
-    ledger, briefing, _ = mods
+    ledger, briefing, mailboxes = mods
     ledger.upsert_loop(direction="i_owe", counterparty="Vendor", summary="x",
                        channel="front", source_ref="cnv_9", mailbox="cfm")
     keys = [k for k, _ in briefing.gather_by_mailbox()]
-    assert "other" not in keys
-    assert keys == ["cfm", "edom"], "registered mailboxes always appear, in order"
+    assert "other" not in keys, "an empty unassigned bucket must not get a workbook"
+    # Derived from the registry, not hardcoded — adding a mailbox should not
+    # break this test (an earlier version listed the keys literally and did).
+    assert keys == mailboxes.keys(), \
+        "every registered mailbox appears, in registry order, even when empty"
 
 
 def test_render_all_has_a_section_per_mailbox(mods):

@@ -163,22 +163,46 @@ change: the pipeline starts scanning its inbox, new loops get stamped, the expor
 writes another workbook, the briefing grows a section. Nothing else hardcodes a
 mailbox.
 
-| key | label | address | Front inbox | scanned |
-|-----|-------|---------|-------------|---------|
-| `cfm` | Jay — CFM | jay@cfmins.org | `inb_csx96` | yes |
-| `edom` | Jay — EDOM | jboggs@episcopalmaryland.org | `inb_cv4ii` | yes |
-| `other` | Unattributed | — | (anything unregistered) | n/a |
-
-`dme` (finance@episcopalmaine.org, `inb_cr72y`, "DME Diocese of Maine") is
-**present but commented out** — one uncomment away. Two cautions recorded there:
-that inbox has never been scanned so it starts at zero loops, and its first
-pipeline run pays for AI review of the whole shared finance queue.
+| key | label | address | Front inbox | scanned | loops (2026-08-18) |
+|-----|-------|---------|-------------|---------|--------------------|
+| `cfm` | Jay — CFM | jay@cfmins.org | `inb_csx96` | yes | 468 |
+| `edom` | Jay — EDOM | jboggs@episcopalmaryland.org | `inb_cv4ii` | yes | 162 |
+| `dme` | DME Finance | finance@episcopalmaine.org | `inb_cr72y` | **no** | 28 |
+| `other` | Unattributed | — | (anything unregistered) | n/a | 0 |
 
 **Jay's original third address, `jboggs@episcopalmaine.org`, does not exist in
 Front** — no inbox, no channel. Verified live. The near-identical
 `jboggs@episcopalmaryland.org` is the real one and holds most existing loops.
 Don't "restore" the Maine spelling without confirming a mailbox was actually
 connected.
+
+### Why `dme` is registered with `scan: False` — read before "fixing" it
+An early reading of the config concluded this inbox had **zero** loops, because
+it is not in `INBOX_IDS` and therefore not in the inbox scan list. That was
+wrong: it has 28. They arrive by a **second, easily-missed route** — the
+`teammate-ids` secret is `tea_byq3e` (Jay), so `_fetch_all_sources` also calls
+`list_assigned_conversations` and pulls **every conversation assigned to Jay
+regardless of which inbox it lives in**. DME finance conversations assigned to
+him land in the ledger that way. Local `.env` has `TEAMMATE_IDS=` empty, which is
+why this is invisible when reasoning from the local config alone — check the
+`teammate-ids` secret, not `.env`.
+
+Consequences worth keeping straight:
+- Registering it costs nothing. Those loops are already fetched and already paid
+  for; the entry only decides whether they are *labelled* "DME Finance" or dumped
+  in the Unattributed bucket. Same file count either way.
+- Flipping `scan` to `True` is a genuinely different decision: it would fetch the
+  **whole shared finance queue**, not just Jay's assigned items, and pay for AI
+  review of all of it. Not done, and not implied by the entry existing.
+- More generally: **any** inbox where Jay gets assigned conversations can produce
+  loops. That is why the Unattributed bucket exists and why the export creates a
+  workbook for it when non-empty rather than dropping those loops.
+
+This also means Jay's ask for a `finance@episcopalmaine.org` spreadsheet was
+already backed by real data — it just wasn't labelled. He asked for two
+spreadsheets "for this round," but three mailboxes have loops, and the only way to
+produce two files is to drop the 28 DME loops out of triage entirely. Three
+correctly-labelled workbooks was chosen over two plus silent data loss.
 
 ### Attribution rule
 A loop belongs to the mailbox whose Front inbox its conversation sits in, asked
@@ -249,8 +273,22 @@ pass treated that as a hard error and skipped ~2% of loops; it now retries.
   `send()` on 2026-07-30.
 - Export verified by loading the generated workbooks back with openpyxl (sheets,
   rows, per-mailbox Instructions header) and by exercising the zero-loop case.
-- Backfill run live against production Firestore — see the session notes in the
-  root CLAUDE.md for the resulting distribution.
+- Backfill run live against production Firestore: **658 loops, 468 cfm / 162 edom
+  / 28 dme, zero unattributed, zero unstamped, zero errors.** Verified by querying
+  Firestore directly afterwards, not from the script's own summary.
+- All three workbooks loaded back with openpyxl: row counts 468/162/28 sum to
+  exactly the 658 in the ledger; per-mailbox Instructions header correct; dropdown
+  present; `_id` hidden. Importer confirmed to see all three as one batch.
+- Morning email sent live (`delivery=http`, 3 attachments) and its rendered
+  markdown inspected: index line plus a correctly-scoped section per mailbox.
+
+### Unrelated observation worth chasing later
+Every one of the 658 open loops has `direction='i_owe'`; the ledger has **zero
+`owed_to_me` loops**, so "Waiting on others" renders empty in every mailbox. That
+is pre-existing and untouched by this change, but it means one of the briefing's
+four sections is dead weight — either direction detection in
+`extract.loop_from_thread` is skewed toward "on you", or nothing outstanding is
+genuinely owed to Jay. Worth a look before trusting that section.
 
 ### Gotcha for local runs
 `.env` sets `COS_DB_PATH=` (empty) with `load_dotenv(override=True)`, so setting
@@ -269,9 +307,10 @@ deliberately left alone.
 
 1. **Test workbook end-to-end** — Refresh Triage (verify all columns/colors), Save Actions (mark one item done, confirm Firestore update), Send Briefing (confirm email arrives).
 2. **ENTITY-1** — entity field on loops; needs Front inbox IDs mapped to entity codes (InboxMap tab in QBOcompanies.xlsx). Prerequisite: confirm inbox ID → entity mapping with Jay. **Note (2026-08-18):** `cos/mailboxes.py` now does inbox → mailbox mapping in code. If ENTITY-1 goes ahead, extend that registry rather than adding a second inbox-mapping table — the split-brain risk is the same one flagged for `user_program_areas` in 26-129.
-3. **Third mailbox (DME Finance)** — uncomment the `dme` entry in `cos/mailboxes.py` when Jay wants it. Confirm first that scanning a shared finance queue is intended (new AI spend, `MAX_RUN_COST_USD` still caps a run).
+3. **DME Finance: decide whether to actually scan it.** It is registered and produces a workbook today from Jay's assigned conversations (28 loops). Setting `scan: True` in `cos/mailboxes.py` would additionally pull the whole shared finance queue and pay for AI review of it — Jay has not asked for that. Separately, if he ever wants only two workbooks, the 28 DME loops have to go somewhere; there is no configuration that yields two files without dropping them.
 4. **Scope the .xlsm workbook to a mailbox** — the server already accepts `?mailbox=`; the workbook still pulls all mailboxes into one sheet. Needs a Config/Controls selector + VBA rebuild.
 5. **Twilio setup** — add TWILIO_ACCOUNT_SID/AUTH_TOKEN/FROM/TO secrets to GCP for Positive Pay SMS alerts
-6. **Teammate-ids** — confirm whether `tea_byq3e` should stay in scope
-7. **Uncommitted drift in this folder** — `create_triage_workbook.py`, `VBA/`, `CoS Triage Workbook.xlsm`, `poll_front_archived.py`, `verify_deploy.py`, `recover_failed_plaud_loops.py` and several `*-CFM2606.py` / `*_pre_*.py` copies are untracked and have never been committed. None are in the Docker image's runtime path so the deploy is unaffected, but this is the same orphaned-work pattern the root CLAUDE.md warns about. Decide per file: commit, or move to a clearly-marked archive folder.
-8. Remaining roadmap: M2 vault, M6 Zoom, M7 memory/voice
+6. **Teammate-ids** — confirm whether `tea_byq3e` should stay in scope. **This is now a bigger decision than it looks (2026-08-18):** that secret is the reason loops arrive from inboxes that are not in `INBOX_IDS` at all — it fetches every conversation assigned to Jay regardless of inbox, and it is the sole source of the 28 DME Finance loops. Removing it would silently empty that mailbox's workbook. Any change here should be checked against the mailbox distribution first.
+7. **`verify_deploy.py` is broken on this PC (found 2026-08-18)** — it fails with `403 run.jobs.get denied` because ADC resolves to `GOOGLE_APPLICATION_CREDENTIALS` → `cfm-daily-jobs-sa`, which has no Cloud Run read access on `cfm-front-mail`; it also reports a stale "expecting image tag" derived from the wrong ref. Verify deploys with `gcloud run jobs describe <job> --region us-east1 --project cfm-front-mail --format="value(spec.template.spec.template.spec.containers[0].image)"` instead (the gcloud CLI is authenticated as `jay@cfmins.org`). For the *service*, also check `status.latestReadyRevisionName`/`status.traffic[0].revisionName`, not just the spec image — see `feedback_cloud_run_deploy_verification`.
+8. **Uncommitted drift in this folder** — `create_triage_workbook.py`, `VBA/`, `CoS Triage Workbook.xlsm`, `poll_front_archived.py`, `verify_deploy.py`, `recover_failed_plaud_loops.py` and several `*-CFM2606.py` / `*_pre_*.py` copies are untracked and have never been committed. None are in the Docker image's runtime path so the deploy is unaffected, but this is the same orphaned-work pattern the root CLAUDE.md warns about. Decide per file: commit, or move to a clearly-marked archive folder.
+9. Remaining roadmap: M2 vault, M6 Zoom, M7 memory/voice
