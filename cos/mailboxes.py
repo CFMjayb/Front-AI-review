@@ -10,20 +10,35 @@ the only edit needed: the pipeline starts scanning its inbox, new loops get
 stamped with its key, the export writes another workbook, and the briefing grows
 another section. Nothing else hardcodes a mailbox.
 
-Attribution rule: a loop belongs to the mailbox whose Front inbox the source
-conversation sits in — asked of Front directly, never inferred from the
-recipient list (a conversation can be addressed to several of Jay's addresses
-while living in exactly one inbox). A conversation in more than one registered
-inbox is attributed to the first match in registry order, so the order below is
-deliberate: most-specific/most-owned first.
+Attribution rule — the **To: field**. A loop belongs to the mailbox whose address
+the mail was sent to, regardless of who sent it. Addressed to two of Jay's
+addresses? It belongs to BOTH mailboxes and appears on both spreadsheets, so a
+loop carries a LIST of keys, not one.
 
-Loops that predate this registry, or that come from an inbox not listed here,
-land in the UNASSIGNED bucket rather than being silently dropped.
+Cc does not count — only To.
+
+The Front inbox is a **fallback only**, for conversations where no To: address
+matches: a BCC, a forward, or a non-email channel (SMS, Slack) that has no
+recipient handle at all. Anything still unresolved lands in the UNASSIGNED bucket
+rather than being silently dropped.
+
+History worth keeping: the first version of this attributed purely by Front inbox.
+That is subtly different and wrong — mail from EDOM's business office sent to
+jay@cfmins.org is filed by Front in the CFM inbox, which is correct for "which
+mailbox did this arrive in" but not for "which of my addresses was it sent to"
+once a thread involves more than one of them.
 """
 import os
 
 UNASSIGNED = "other"
 UNASSIGNED_LABEL = "Unattributed"
+
+# Attribution is by the **To: field** — which of Jay's addresses the mail was sent
+# to. Jay, 2026-08-18: "if an email comes in to jay@cfmins.org it goes on CFM. if
+# an email comes in to jboggs@episcopalmaryland.org it is on EDOM — this has
+# nothing to do with who the email is from." Cc does NOT count (his call), and a
+# message addressed to two of his addresses belongs to BOTH mailboxes, so a loop
+# can carry more than one key.
 
 # ── The registry ─────────────────────────────────────────────────────────────
 # key       short, stable, used in the loop record + filenames. Never rename a
@@ -40,6 +55,7 @@ MAILBOXES: list[dict] = [
         "key": "cfm",
         "label": "Jay — CFM",
         "address": "jay@cfmins.org",
+        "addresses": ["jay@cfmins.org"],
         "inbox_ids": ["inb_csx96"],
         "scan": True,
     },
@@ -47,6 +63,7 @@ MAILBOXES: list[dict] = [
         "key": "edom",
         "label": "Jay — EDOM",
         "address": "jboggs@episcopalmaryland.org",
+        "addresses": ["jboggs@episcopalmaryland.org"],
         "inbox_ids": ["inb_cv4ii"],
         "scan": True,
     },
@@ -67,7 +84,10 @@ MAILBOXES: list[dict] = [
     {
         "key": "dme",
         "label": "DME Finance",
-        "address": "finance@episcopalmaine.org",   # receives as ...@episcopalmaine.net
+        "address": "finance@episcopalmaine.org",
+        # This inbox RECEIVES as ...@episcopalmaine.net and SENDS AS ...org, so
+        # both spellings must count or its mail lands nowhere.
+        "addresses": ["finance@episcopalmaine.org", "finance@episcopalmaine.net"],
         "inbox_ids": ["inb_cr72y"],
         "scan": False,
     },
@@ -125,6 +145,45 @@ def key_for_inboxes(inbox_ids: list[str]) -> str:
         if ids.intersection(m["inbox_ids"]):
             return m["key"]
     return UNASSIGNED
+
+
+def addresses_for(key: str) -> list[str]:
+    m = by_key(key) or {}
+    return [a.lower() for a in m.get("addresses", [])]
+
+
+def keys_on_loop(loop: dict) -> list[str]:
+    """Every mailbox key a stored loop belongs to.
+
+    Prefers the `mailboxes` list field (post-To:-rule loops, possibly several
+    keys). Falls back to the single `mailbox` field for loops written before
+    that field existed. [UNASSIGNED] when neither is set, so callers can treat
+    "no mailbox" as a real membership rather than a missing field.
+    """
+    keys = loop.get("mailboxes")
+    if keys:
+        return list(keys)
+    single = loop.get("mailbox")
+    return [single] if single else [UNASSIGNED]
+
+
+def keys_for_recipients(to_handles) -> list[str]:
+    """Mailbox keys for a message's To: handles — the primary attribution rule.
+
+    Returns EVERY mailbox matched, in registry order, because a message addressed
+    to two of Jay's addresses belongs on both spreadsheets (his explicit call).
+    Returns [] when no address matches, which is a real answer — the caller falls
+    back to the Front inbox rather than guessing.
+
+    Pass To: handles only. Cc does not count.
+    """
+    got = {(h or "").strip().lower() for h in (to_handles or [])}
+    got.discard("")
+    out: list[str] = []
+    for m in MAILBOXES:
+        if got.intersection(a.lower() for a in m.get("addresses", [])):
+            out.append(m["key"])
+    return out
 
 
 def scan_inbox_ids() -> list[str]:

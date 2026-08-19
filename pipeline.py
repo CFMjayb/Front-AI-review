@@ -21,6 +21,18 @@ logger = logging.getLogger(__name__)
 # extraction. Underscore-prefixed so it can never collide with a Front API field.
 _MAILBOX_HINT = "_cos_mailbox"
 
+# Plaud.ai meeting-notes ingestion. Turned OFF 2026-08-18 at Jay's request
+# ("let's remove all plaud.ai from this tool for now"): one loop per extracted
+# action item swamped the triage sheet — 309 of 687 loops — and many were
+# unusable (64 assigned to "Speaker 1/2/3/4" because the recording never
+# identified the speaker).
+#
+# Disabled, not deleted. A plaud.ai email is still recognised and still gets the
+# processed tag, so it is skipped cheaply instead of falling through to ordinary
+# AI review, which would cost money and produce junk loops of a different shape.
+# Set PLAUD_ENABLED=true to turn it back on; modules/plaud_extract.py is intact.
+PLAUD_ENABLED = os.environ.get("PLAUD_ENABLED", "false").lower() == "true"
+
 # Front has no literal "open" status — an open conversation is assigned OR
 # unassigned (as opposed to archived / deleted / trashed / spam).
 _OPEN_STATUSES = {"open", "assigned", "unassigned"}
@@ -76,23 +88,35 @@ def _fetch_all_sources(front: FrontClient, since_ms: int) -> list[dict]:
     return all_convs
 
 
-def _mailbox_for(conv: dict, front: FrontClient) -> str:
-    """Mailbox key for a conversation.
+def _mailboxes_for(conv: dict, messages: list[dict], front: FrontClient) -> list[str]:
+    """Mailbox key(s) for a conversation — Jay's rule, 2026-08-18: attribution is
+    the To: field, not who sent it and not which Front inbox filed it. A message
+    addressed to two of Jay's addresses belongs on BOTH sheets.
 
-    Uses the hint stamped during the inbox fetch when present (free); otherwise
-    asks Front which inbox the conversation lives in (single-conversation mode
-    and the teammate-assigned path have no hint). Never raises — an unknown
-    mailbox is better than a failed conversation.
+    Reads To: handles straight from the already-fetched messages (free — no
+    extra Front call). Cc deliberately does not count.
+
+    Falls back, in order, to: the inbox-fetch hint, then a live Front inbox
+    lookup — for the cases with no To: match at all (BCC, a forward, or the
+    teammate-assigned path, which has neither a hint nor guaranteed To: data).
+    Never raises — an unknown mailbox is better than a failed conversation.
     """
+    to_handles = [r.get("handle") for m in (messages or [])
+                  for r in (m.get("recipients") or []) if r.get("role") == "to"]
+    keys = mailboxes.keys_for_recipients(to_handles)
+    if keys:
+        return keys
+
     hint = conv.get(_MAILBOX_HINT)
     if hint:
-        return hint
+        return [hint]
+
     try:
         ids = [i.get("id") for i in front.list_conversation_inboxes(conv["id"])]
-        return mailboxes.key_for_inboxes([i for i in ids if i])
+        return [mailboxes.key_for_inboxes([i for i in ids if i])]
     except Exception as exc:
         logger.warning(f"mailbox lookup failed for {conv.get('id')}: {exc}")
-        return mailboxes.UNASSIGNED
+        return [mailboxes.UNASSIGNED]
 
 
 def _dedupe_by_id(conversations: list[dict]) -> list[dict]:
@@ -220,6 +244,27 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
                 }
 
         # ── Plaud.ai meeting notes ────────────────────────────────────────────
+        if plaud_extract.is_plaud_email(conv, messages) and not PLAUD_ENABLED:
+            # Skip without extraction: tag it processed so it is neither
+            # re-examined nor re-billed, create no loops, and archive it — a
+            # conversation nothing ever surfaces must not sit open, unread,
+            # forever (caught by Jay 2026-08-18: the retirement scripts made
+            # this same mistake for the existing backlog).
+            logger.info(f"[plaud] {cid} — Plaud ingestion disabled, skipping")
+            if not dry_run:
+                front.add_tag(cid, "AI/meeting-notes")
+                front.add_tag(cid, PROCESSED_TAG)
+                from cos import front_archive
+                front_archive.archive_conversation(front, cid, label=cid)
+            else:
+                logger.info(f"[dry-run] would tag+archive+skip Plaud email {cid}")
+            return {
+                "conversation_id": cid, "subject": conv.get("subject"),
+                "duration_s": time.time() - started, "cost_usd": 0.0,
+                "errored": False, "prefiltered": True,
+                "modules": {"skip_reason": "plaud_disabled"},
+            }
+
         if plaud_extract.is_plaud_email(conv, messages):
             logger.info(f"[plaud] {cid} — extracting action items")
             try:
@@ -287,6 +332,13 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
                     )
                 front.add_tag(cid, f"AI/sender-rule-{sr_action}")
                 front.add_tag(cid, PROCESSED_TAG)
+                if sr_action == "exclude":
+                    # No loop is created for "exclude" (unlike "fyi", which makes
+                    # a visible, auto-clearing loop on purpose) — nothing will
+                    # ever surface this conversation, so leaving it open in
+                    # Front just strands it. Archive it now.
+                    from cos import front_archive
+                    front_archive.archive_conversation(front, cid, label=cid)
             else:
                 logger.info(f"[dry-run] sender-rule {sr_action}: would skip Claude for {cid} ({sr_sender})")
             logger.info(f"[sender-rule] {cid} skipped AI review — {sr_action} ({sr_sender})")
@@ -354,7 +406,7 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
             try:
                 loop = front_extract.extract_from_analysis(
                     conv, messages, result["output"], dry_run=dry_run,
-                    mailbox=_mailbox_for(conv, front))
+                    mailboxes=_mailboxes_for(conv, messages, front))
                 if loop:
                     module_results["loop"] = loop
             except Exception as exc:

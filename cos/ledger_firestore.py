@@ -78,7 +78,8 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
                 fyi: bool = False, source_date: str = "",
                 urgency: str = "", action_type: str = "", sentiment: str = "",
                 escalation_risk: float = 0.0, suggested_assignee: str = "",
-                dedup_key: str = "", mailbox: str = "") -> dict:
+                dedup_key: str = "", mailbox: str = "",
+                mailboxes: Optional[list] = None) -> dict:
     if direction not in VALID_DIRECTIONS:
         raise ValueError(f"invalid direction: {direction!r}")
     if status and status not in VALID_STATUSES:
@@ -109,7 +110,8 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
                 "sentiment": sentiment or None, "escalation_risk": escalation_risk or None,
                 "suggested_assignee": suggested_assignee or None,
                 "dedup_key": dedup_key or None,
-                "mailbox": mailbox or None,
+                "mailbox": mailbox or (mailboxes[0] if mailboxes else None),
+                "mailboxes": list(mailboxes) if mailboxes else None,
                 "snooze_until": None, "first_seen": now, "last_activity": last_activity,
                 "last_reviewed": now, "notes": None,
             })
@@ -139,6 +141,9 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
             # doesn't know the mailbox (e.g. reconcile) blank it out.
             if mailbox and not ex.get("mailbox"):
                 updates["mailbox"] = mailbox
+            if mailboxes and not ex.get("mailboxes"):
+                updates["mailboxes"] = list(mailboxes)
+                updates.setdefault("mailbox", mailboxes[0])
             txn.update(ref, updates)
 
     _txn(db.transaction())
@@ -237,13 +242,13 @@ def list_loops(*, direction: str = "", channel: str = "", status: str = "",
 
     loops = [_loop_doc(s) for s in q.stream()]
     if mailbox:
-        # Filtered client-side (not pushed to Firestore) so the UNASSIGNED bucket
-        # can match loops whose mailbox field is missing entirely — a query for
-        # == "other" would never return those.
+        # Filtered client-side (not pushed to Firestore) for two reasons: the
+        # UNASSIGNED bucket must match loops with no mailbox field at all, and a
+        # loop can belong to SEVERAL mailboxes (addressed to two of Jay's
+        # addresses), so this is a membership test, not equality.
         from cos import mailboxes as _mb
         want = mailbox.strip().lower()
-        loops = [l for l in loops
-                 if (l.get("mailbox") or _mb.UNASSIGNED) == want]
+        loops = [l for l in loops if want in _mb.keys_on_loop(l)]
     if not status and not include_resolved:
         loops = [l for l in loops if l["status"] not in ("done", "dropped")]
     if overdue_only:
@@ -286,7 +291,8 @@ def patch_loop(loop_id_: str, *, notes: Optional[str] = None,
                category: Optional[str] = None, fyi: Optional[bool] = None,
                deferred: Optional[bool] = None,
                front_archived: Optional[bool] = None,
-               mailbox: Optional[str] = None) -> Optional[dict]:
+               mailbox: Optional[str] = None,
+               mailboxes: Optional[list] = None) -> Optional[dict]:
     """Update mutable human-editable fields without touching status or ingestion fields."""
     updates: dict = {"last_reviewed": now_iso()}
     if notes is not None:
@@ -301,6 +307,8 @@ def patch_loop(loop_id_: str, *, notes: Optional[str] = None,
         updates["front_archived"] = bool(front_archived)
     if mailbox is not None:
         updates["mailbox"] = mailbox or None
+    if mailboxes is not None:
+        updates["mailboxes"] = list(mailboxes) or None
     ref = _db().collection(_LOOPS).document(loop_id_)
     if not ref.get().exists:
         return None

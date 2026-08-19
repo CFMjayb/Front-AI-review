@@ -58,17 +58,19 @@ def _normalize(messages: list[dict]) -> list[dict]:
 
 
 def extract_from_analysis(conv: dict, messages: list[dict], analysis: dict,
-                          *, dry_run: bool = False, mailbox: str = "") -> dict | None:
+                          *, dry_run: bool = False,
+                          mailboxes: list[str] | None = None) -> dict | None:
     """Turn a Front conversation's existing analysis into a loop (or None).
 
-    mailbox: the registry key for the Front inbox this conversation came from
-    (see cos/mailboxes.py). Blank means unattributed rather than wrong.
+    mailboxes: registry key(s) this conversation is attributed to (see
+    cos/mailboxes.py) — a list because a message addressed to two of Jay's
+    addresses belongs to both. Empty/None means unattributed rather than wrong.
     """
     conv_id = conv.get("id")
     thread = extract.build_thread(
         channel="front", source_ref=conv_id, subject=conv.get("subject") or "",
         source_link=front_source_link(conv_id), messages=_normalize(messages),
-        mailbox=mailbox)
+        mailboxes=mailboxes or [])
     return extract.loop_from_thread(thread, analysis, dry_run=dry_run)
 
 

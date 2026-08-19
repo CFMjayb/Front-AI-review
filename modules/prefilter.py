@@ -18,8 +18,11 @@ spam at ~$0.02). Never fires on a thread Jay has already replied to.
 
 A match is tagged AI/spam + AI/processed and skipped. Disable with SPAM_PREFILTER=false.
 """
+import logging
 import os
 import re
+
+logger = logging.getLogger(__name__)
 
 # Dedicated MARKETING email-platform sending domains. These send marketing/
 # newsletter blasts (not transactional mail), so they're safe to skip without
@@ -131,9 +134,25 @@ def sender_rule_skip(conv: dict, messages: list[dict]) -> tuple[bool, dict | Non
         return False, None, ""
     from cos import extract as cos_extract
     rule = cos_extract.sender_rule_action(sender_email)
-    if rule and rule.get("action") in ("exclude", "fyi"):
-        return True, rule, sender_email
-    return False, None, sender_email
+    if not rule or rule.get("action") not in ("exclude", "fyi"):
+        return False, None, sender_email
+
+    # An optional subject_pattern narrows the rule to some of a sender's mail.
+    # Needed for shared mailboxes: businessoffice@episcopalmaryland.org sends
+    # both automated Beacon notifications (skip, no AI cost) and real mail from
+    # real people (must still be reviewed). No pattern = the whole sender.
+    pattern = (rule.get("subject_pattern") or "").strip()
+    if pattern:
+        try:
+            if not re.search(pattern, conv.get("subject") or "", re.I):
+                return False, None, sender_email
+        except re.error:
+            # A bad pattern must not silently swallow the sender's mail; fall
+            # through to normal review and let the loop be created.
+            logger.warning("sender rule for %s has an invalid subject_pattern %r",
+                           sender_email, pattern)
+            return False, None, sender_email
+    return True, rule, sender_email
 
 
 def looks_like_bulk(conv: dict, messages: list[dict]) -> tuple[bool, str | None]:

@@ -147,6 +147,22 @@ def test_render_all_totals_match_the_sum_of_sections(mods):
     assert sum(len(sec["waiting"]) for _, sec in per) == len(briefing.gather()["waiting"])
 
 
+def test_a_loop_can_belong_to_two_mailboxes(mods):
+    """Jay's own rule: a message addressed to two of his addresses belongs on
+    BOTH sheets. Regression for a real bug found 2026-08-18: both ledger
+    backends' list_loops(mailbox=...) either ignored the filter entirely
+    (sqlite — the WHERE clause was deleted and never replaced) or called a
+    keys_on_loop() that did not exist yet (firestore) — both bugs made every
+    mailbox filter a no-op, caught only because these tests failed loudly."""
+    ledger, _, mailboxes = mods
+    ledger.upsert_loop(direction="i_owe", counterparty="Multi", summary="both",
+                       channel="front", source_ref="cnv_multi",
+                       mailboxes=["cfm", "edom"])
+    assert len(ledger.list_loops(mailbox="cfm")) == 1
+    assert len(ledger.list_loops(mailbox="edom")) == 1
+    assert len(ledger.list_loops()) == 1, "still exactly one loop, not duplicated"
+
+
 def test_calendar_appears_once_not_per_mailbox(mods):
     ledger, briefing, _ = mods
     _seed(ledger)

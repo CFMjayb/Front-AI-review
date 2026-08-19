@@ -78,7 +78,8 @@ COLS = [
     ("Dir",           9),
     ("Action Type",  12),
     ("Counterparty", 22),
-    ("Summary",      55),
+    ("Email",        30),   # sender's address — needed to tell us what to exclude
+    ("Summary",      50),
     ("Category",     13),
     ("Age",           6),
     ("Due",          11),
@@ -123,6 +124,27 @@ def _parse_date(s: str | None) -> datetime.date | None:
 def _age_days(first_seen: str | None, today: datetime.date) -> int | None:
     d = _parse_date(first_seen)
     return (today - d).days if d else None
+
+
+def _triage_action_list() -> str:
+    """The Action dropdown, with delegation targets pulled from the importer's
+    own DELEGATES map so the sheet can never offer an action the importer does
+    not understand (or miss one it does)."""
+    base = ["done", "drop", "exclude", "subscribe", "fyi", "defer"]
+    try:
+        from cos_triage_import import DELEGATES
+        base += list(DELEGATES)
+    except Exception:
+        base += ["delegate to admin", "send to sally"]
+    base += ["snooze 1d", "snooze 3d", "snooze 1w", "snooze 2w", "snooze 1m"]
+    joined = ",".join(base)
+    # Excel caps an inline validation list at 255 chars and fails silently past
+    # it — the dropdown just stops appearing. Adding a few more delegates would
+    # reach that; say so loudly rather than shipping a sheet with no dropdown.
+    if len(joined) > 250:
+        print(f"  WARNING: Action dropdown is {len(joined)} chars (Excel limit 255). "
+              f"Move the list to a hidden sheet and reference it by range.")
+    return joined
 
 
 def _row_fill(loop: dict, *, deferred: bool = False) -> str:
@@ -218,8 +240,9 @@ def export(output_path: str | None = None, *, mailbox: str = "",
             urgency,                          # Urgency
             dir_label,                        # Dir
             loop.get("action_type") or "",    # Action Type
-            loop.get("counterparty") or "",   # Counterparty
-            loop.get("summary") or "",        # Summary
+            loop.get("counterparty") or "",       # Counterparty
+            loop.get("counterparty_email") or "",  # Email
+            loop.get("summary") or "",             # Summary
             loop.get("category") or "",       # Category
             age if age is not None else "",   # Age
             _parse_date(loop.get("due_at")),  # Due (Excel date)
@@ -299,8 +322,7 @@ def export(output_path: str | None = None, *, mailbox: str = "",
     if total_rows >= 2:
         dv = DataValidation(
             type="list",
-            formula1='"done,drop,exclude,subscribe,fyi,defer,'
-                     'snooze 1d,snooze 3d,snooze 1w,snooze 2w,snooze 1m"',
+            formula1=f'"{_triage_action_list()}"',
             allow_blank=True,
             showDropDown=False,
         )
@@ -347,6 +369,11 @@ def export(output_path: str | None = None, *, mailbox: str = "",
         ("AGE COLUMN:", True),
         ("  Orange bold = open 14+ days.  Red bold = open 30+ days.", False),
         ("", False),
+        ("EMAIL COLUMN:", True),
+        ("  The sender's actual address. If a sender should never appear here at", False),
+        ("  all, say so and it gets a permanent exclude rule — no AI cost, no row.", False),
+        ("  Use the Sender Rules sheet to add one yourself: action = exclude.", False),
+        ("", False),
         ("TRIAGE ACTIONS:", True),
         ("  done          — mark the loop as completed", False),
         ("  drop          — discard (won't appear again)", False),
@@ -354,6 +381,8 @@ def export(output_path: str | None = None, *, mailbox: str = "",
         ("  subscribe     — tag in Front as reading-list + drop", False),
         ("  fyi           — re-classify as notification; auto-clears in 24h", False),
         ("  defer         — move to Deferred section; hidden from briefing", False),
+        ("  delegate to admin — email it to admin@cfmins.org; they own it now", False),
+        ("  send to sally    — email it to Sally Swygert; she owns it now", False),
         ("  snooze 1d/3d/1w/2w/1m  — hide until that time", False),
         ("  snooze YYYY-MM-DD      — hide until specific date", False),
         ("  (blank)       — no action; Notes still saved if filled in", False),

@@ -47,56 +47,16 @@ def _get_front() -> Any:
     return _front_client
 
 
-_FRONT_OPEN_STATUSES = {"open", "assigned", "unassigned"}
-
-
 def _archive_in_front(loop_rec: Optional[dict], num: Any) -> bool:
     """Archive the source Front conversation when a loop is resolved.
 
-    Only acts on loops with channel=front and a source_ref.  Warns but does not
-    raise on failure so a Front error never blocks a Firestore update.
-
-    Checks the current Front status first:
-      - Already non-open (archived/spam/deleted) → no PATCH needed, return True
-        so the caller stamps front_archived=True in Firestore.
-      - 404 → gone from Front → same, return True.
-      - Still open → PATCH to archived → return True.
-      - Any other error → warn and return False.
-
-    Returns True if Firestore should be stamped front_archived=True.
+    Thin wrapper over cos/front_archive.py, the single implementation every
+    caller (this importer, the retirement scripts, the pipeline's exclude
+    paths) shares — so "taken off the triage list" and "archived in Front"
+    can never drift apart again the way they did on 2026-08-18.
     """
-    if not loop_rec or loop_rec.get("channel") != "front":
-        return False
-    src = loop_rec.get("source_ref")
-    if not src:
-        return False
-    front = _get_front()
-    try:
-        conv = front.get_conversation(src)
-        front_status = conv.get("status") or ""
-    except Exception as exc:
-        # 404 → conversation gone; treat as already resolved.
-        # Other errors → warn, don't stamp (status unknown).
-        status_code = getattr(exc, "status", None)
-        if status_code == 404:
-            print(f"    → Front conversation not found ({src}) — stamping anyway")
-            return True
-        print(f"    WARNING: could not fetch Front status for {src}: {exc}")
-        return False
-
-    if front_status not in _FRONT_OPEN_STATUSES:
-        # Already archived / spam — Front agrees, nothing to change.
-        print(f"    → already {front_status!r} in Front ({src}) — stamping")
-        return True
-
-    # Conversation is still open — archive it.
-    try:
-        front.set_status(src, "archived")
-        print(f"    → archived in Front ({src})")
-        return True
-    except Exception as exc:
-        print(f"    WARNING: could not archive {src} in Front: {exc}")
-        return False
+    from cos import front_archive
+    return front_archive.archive_loop(_get_front(), loop_rec, printer=print)
 
 
 def _parse_snooze_until(value: str) -> str | None:
@@ -126,6 +86,64 @@ def _parse_snooze_until(value: str) -> str | None:
 
 
 _TS_RE = re.compile(r"CoS Triage (\d{4}-\d{2}-\d{2}(?: \d{2}-\d{2})?)")
+
+
+# ── Delegation ───────────────────────────────────────────────────────────────
+# Triage action -> (recipient, human name). Handing an item to someone emails
+# them the loop and takes it off Jay's list; they now own it.
+#
+# Add a person here and they become a new dropdown option automatically — the
+# export builds the Triage Action list from these keys, so the sheet and the
+# importer can never drift apart.
+DELEGATES: dict[str, tuple[str, str]] = {
+    "delegate to admin": (os.environ.get("COS_ADMIN_EMAIL", "admin@cfmins.org"),
+                          "the admin mailbox"),
+    "send to sally":     (os.environ.get("COS_SALLY_EMAIL",
+                                         "sswygert@episcopalmaryland.org"),
+                          "Sally Swygert"),
+}
+
+
+def _delegate(loop: dict, num, note: str, to_email: str, to_name: str) -> bool:
+    """Email a loop to someone else so they can carry it.
+
+    Returns False on any failure. The caller then leaves the loop OPEN — a
+    delegation that did not actually send must never silently clear the item,
+    or the task disappears with nobody holding it.
+    """
+    if not loop:
+        return False
+    try:
+        from cos import sender
+    except Exception as exc:
+        print(f"      sender unavailable: {exc}")
+        return False
+
+    cp = loop.get("counterparty") or "unknown"
+    cp_email = loop.get("counterparty_email") or ""
+    subject = f"[Delegated] #{num} - {cp}: {(loop.get('summary') or '')[:70]}"
+    body = [
+        f"Jay has delegated this open item to {to_name} to complete.",
+        "",
+        f"**From:** {cp}" + (f" <{cp_email}>" if cp_email else ""),
+        f"**Item:** {loop.get('summary') or '(no summary)'}",
+    ]
+    if loop.get("category"):
+        body.append(f"**Category:** {loop['category']}")
+    if loop.get("due_at"):
+        body.append(f"**Due:** {loop['due_at'][:10]}")
+    if loop.get("source_link"):
+        body.append(f"**Open in Front:** [{loop['source_link']}]({loop['source_link']})")
+    if note:
+        body += ["", f"**Jay's note:** {note}"]
+    body += ["", "-- Chief of Staff"]
+
+    try:
+        sender.send(subject=subject, body_md="\n".join(body), to=[to_email])
+        return True
+    except Exception as exc:
+        print(f"      delegation send failed: {exc}")
+        return False
 
 
 def _find_latest_exports() -> list[Path]:
@@ -231,6 +249,24 @@ def _run_triage_sheet(wb: openpyxl.Workbook) -> dict:
                     ledger.patch_loop(loop_id, front_archived=True)
                 print(f"  #{num} excluded (junk)")
                 dropped += 1
+
+            elif action in DELEGATES:
+                # Hand the item to someone else and take it off Jay's list.
+                to_email, to_name = DELEGATES[action]
+                loop_rec = ledger.get_loop(loop_id)
+                if _delegate(loop_rec, num, notes, to_email, to_name):
+                    ledger.resolve_loop(loop_id, "done", reason=f"delegated:{to_email}")
+                    # Jay's own copy is spoken for now — archive it like any other
+                    # resolved loop, same as done/drop/exclude below.
+                    if _archive_in_front(loop_rec, num):
+                        ledger.patch_loop(loop_id, front_archived=True)
+                    print(f"  #{num} delegated to {to_name} <{to_email}>")
+                    done += 1
+                else:
+                    # The send failed — leave the loop OPEN. Resolving it here
+                    # would drop the item on the floor with nobody holding it.
+                    print(f"  #{num} WARNING: delegation email failed - loop left open")
+                    errored += 1
 
             elif action == "subscribe":
                 loop_rec = ledger.get_loop(loop_id)

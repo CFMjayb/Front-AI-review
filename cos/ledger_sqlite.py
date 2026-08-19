@@ -184,6 +184,11 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE loops ADD COLUMN front_archived INTEGER DEFAULT 0")
     if "mailbox" not in cols:
         conn.execute("ALTER TABLE loops ADD COLUMN mailbox TEXT")
+    if "mailboxes" not in cols:
+        # Comma-separated keys. A loop addressed to two of Jay's addresses belongs
+        # to both mailboxes, so this is a list; `mailbox` keeps the first for
+        # anything that still wants a single value.
+        conn.execute("ALTER TABLE loops ADD COLUMN mailboxes TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_loops_dedup ON loops(dedup_key)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_loops_num ON loops(num)")
 
@@ -226,7 +231,8 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
                 fyi: bool = False, source_date: str = "",
                 urgency: str = "", action_type: str = "", sentiment: str = "",
                 escalation_risk: float = 0.0, suggested_assignee: str = "",
-                dedup_key: str = "", mailbox: str = "") -> dict:
+                dedup_key: str = "", mailbox: str = "",
+                mailboxes: Optional[list] = None) -> dict:
     """Insert a loop or merge into the existing one. Returns the stored row.
 
     Merge rules: first_seen, source_date, and a manually-set status are preserved;
@@ -251,15 +257,17 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
                        summary, channel, source_ref, source_link, category, fyi, status,
                        importance, confidence, due_at, source_date, first_seen, last_activity,
                        last_reviewed, urgency, action_type, sentiment, escalation_risk,
-                       suggested_assignee, dedup_key, mailbox)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       suggested_assignee, dedup_key, mailbox, mailboxes)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (lid, _next_num(conn), direction, counterparty, counterparty_email, summary,
                  channel, source_ref, source_link, category, 1 if fyi else 0,
                  status or "open", importance, confidence, due_at or None,
                  source_date or None, now, last_activity, now,
                  urgency or None, action_type or None, sentiment or None,
                  escalation_risk or None, suggested_assignee or None,
-                 dedup_key or None, mailbox or None),
+                 dedup_key or None,
+                 mailbox or (mailboxes[0] if mailboxes else None),
+                 ",".join(mailboxes) if mailboxes else None),
             )
         else:
             if existing["status"] in MANUAL_STATUSES:
@@ -274,7 +282,8 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
                        urgency=?, action_type=?, sentiment=?,
                        escalation_risk=?, suggested_assignee=?,
                        dedup_key=COALESCE(dedup_key, ?),
-                       mailbox=COALESCE(mailbox, ?)
+                       mailbox=COALESCE(mailbox, ?),
+                       mailboxes=COALESCE(mailboxes, ?)
                    WHERE id=?""",
                 (counterparty, counterparty_email or existing["counterparty_email"],
                  summary, source_link or existing["source_link"],
@@ -285,7 +294,9 @@ def upsert_loop(*, direction: str, counterparty: str, summary: str, channel: str
                  sentiment or existing.get("sentiment"),
                  escalation_risk or existing.get("escalation_risk"),
                  suggested_assignee or existing.get("suggested_assignee"),
-                 dedup_key or None, mailbox or None, lid),
+                 dedup_key or None,
+                 mailbox or (mailboxes[0] if mailboxes else None),
+                 ",".join(mailboxes) if mailboxes else None, lid),
             )
 
         row = conn.execute("SELECT * FROM loops WHERE id = ?", (lid,)).fetchone()
@@ -347,16 +358,6 @@ def list_loops(*, direction: str = "", channel: str = "", status: str = "",
         clauses.append("deferred = 1")
     else:
         clauses.append("(deferred IS NULL OR deferred = 0)")
-    if mailbox:
-        from cos import mailboxes as _mb
-        want = mailbox.strip().lower()
-        if want == _mb.UNASSIGNED:
-            # The unattributed bucket has to include loops with no mailbox at all,
-            # not just ones literally stamped "other".
-            clauses.append("(mailbox IS NULL OR mailbox = '' OR mailbox = ?)")
-        else:
-            clauses.append("mailbox = ?")
-        params.append(want)
 
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     sql = (
@@ -366,7 +367,27 @@ def list_loops(*, direction: str = "", channel: str = "", status: str = "",
     )
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
-    return [dict(r) for r in rows]
+    result = [dict(r) for r in rows]
+
+    if mailbox:
+        # Client-side: `mailboxes` is comma-separated text, and membership
+        # (a loop can belong to several mailboxes) isn't a plain equality test
+        # SQL can do cheaply here. See cos.mailboxes.keys_on_loop.
+        from cos import mailboxes as _mb
+        want = mailbox.strip().lower()
+        result = [l for l in result if want in _mb.keys_on_loop(_expand_mailboxes(l))]
+
+    return result
+
+
+def _expand_mailboxes(row: dict) -> dict:
+    """SQLite stores `mailboxes` as "cfm,edom" text; keys_on_loop wants a list,
+    matching Firestore's native array field. Non-destructive: returns a shallow
+    copy, doesn't mutate the row callers hold onto."""
+    raw = row.get("mailboxes")
+    if raw:
+        row = {**row, "mailboxes": [k for k in raw.split(",") if k]}
+    return row
 
 
 def _age_hours(first_seen: Optional[str]) -> Optional[float]:
@@ -436,7 +457,8 @@ def patch_loop(loop_id_: str, *, notes: Optional[str] = None,
                category: Optional[str] = None, fyi: Optional[bool] = None,
                deferred: Optional[bool] = None,
                front_archived: Optional[bool] = None,
-               mailbox: Optional[str] = None) -> Optional[dict]:
+               mailbox: Optional[str] = None,
+               mailboxes: Optional[list] = None) -> Optional[dict]:
     """Update mutable human-editable fields without touching status or ingestion fields."""
     sets, vals = [], []
     if notes is not None:
@@ -451,6 +473,8 @@ def patch_loop(loop_id_: str, *, notes: Optional[str] = None,
         sets.append("front_archived=?"); vals.append(int(front_archived))
     if mailbox is not None:
         sets.append("mailbox=?"); vals.append(mailbox or None)
+    if mailboxes is not None:
+        sets.append("mailboxes=?"); vals.append(",".join(mailboxes) or None)
     if not sets:
         return get_loop(loop_id_)
     vals.append(now_iso()); vals.append(loop_id_)
