@@ -17,3 +17,9 @@ data/briefings/*
 .idea/
 .pytest_cache/
 data/triage/
+
+# Generated workbooks — each one bakes a real Secret Manager API key into its
+# hidden Config sheet at build time (create_triage_workbook.py). Never commit
+# the binary; the VBA *source* (VBA/*.bas) and the build script are what's
+# tracked instead.
+CoS Triage Workbook*.xlsm
