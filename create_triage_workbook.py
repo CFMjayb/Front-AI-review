@@ -63,6 +63,122 @@ def _get_api_key() -> str:
         return ""
 
 
+def _rgb(r: int, g: int, b: int) -> int:
+    """VBA's RGB() as a plain int — win32com has no built-in equivalent."""
+    return r + (g << 8) + (b << 16)
+
+
+def _write_instructions_sheet(wb, mailbox_label: str) -> None:
+    ws = wb.Sheets.Add(After=wb.Sheets(wb.Sheets.Count))
+    ws.Name = "Instructions"
+    lines = [
+        ("CoS Triage Workbook", True, 14),
+        ("", False, 11),
+        (f"Mailbox: {mailbox_label}" if mailbox_label else
+         "Mailbox: All (unscoped)", False, 11),
+        ("", False, 11),
+        ("DAILY WORKFLOW:", True, 12),
+        ("  1. Click 'Refresh Triage' to pull your current loops.", False, 11),
+        ("  2. Fill in a Triage Action for any row you want to act on "
+         "(dropdown in that column).", False, 11),
+        ("  3. Optionally add a Notes entry — saved even with no action.", False, 11),
+        ("  4. Click 'Upload for Processing' — saves a copy, uploads it, "
+         "the server applies every action, then refreshes this sheet.", False, 11),
+        ("  5. Click 'Send Briefing' any time for an on-demand summary email.", False, 11),
+        ("", False, 11),
+        ("See the 'Action Guide' tab for exactly what each Triage Action "
+         "and Sender Rule Action does.", False, 11),
+        ("", False, 11),
+        ("SENDER RULES / GUIDANCE TABS:", True, 12),
+        ("  Refresh / Save independently of the Triage sheet — pre-classify "
+         "senders and add standing instructions for the AI review.", False, 11),
+        ("", False, 11),
+        ("IMPORTANT:", True, 12),
+        ("  Do not delete the hidden Config sheet or the _id column on "
+         "Triage — both are used internally.", False, 11),
+    ]
+    for i, (text, bold, size) in enumerate(lines, start=1):
+        cell = ws.Cells(i, 1)
+        cell.Value = text
+        cell.Font.Bold = bold
+        cell.Font.Size = size
+    ws.Columns("A").ColumnWidth = 90
+    ws.Tab.Color = _rgb(100, 100, 100)
+
+
+def _write_action_guide_sheet(wb) -> None:
+    """Same content as the .xlsx export's Action Guide tab (cos_triage_export
+    .action_guide_data) — one source, rendered here via COM instead of
+    openpyxl. Keeps the two workbook formats from describing the same action
+    two different ways."""
+    from cos_triage_export import action_guide_data
+    data = action_guide_data()
+
+    ws = wb.Sheets.Add(After=wb.Sheets(wb.Sheets.Count))
+    ws.Name = "Action Guide"
+    ws.Tab.Color = _rgb(107, 58, 166)
+
+    HDR_FILL = _rgb(107, 58, 166)
+    SECTION_FILL = _rgb(68, 68, 102)
+
+    row = 1
+    ws.Cells(row, 1).Value = "Triage Workbook — Action Guide"
+    ws.Cells(row, 1).Font.Bold = True
+    ws.Cells(row, 1).Font.Size = 14
+    row += 1
+    ws.Cells(row, 1).Value = ("What each dropdown option actually does, "
+        "generated to match the real import code — not a hand-written "
+        "summary that can drift out of date.")
+    ws.Cells(row, 1).Font.Italic = True
+    row += 2
+
+    def section(text):
+        nonlocal row
+        for c in range(1, 4):
+            cell = ws.Cells(row, c)
+            cell.Value = text if c == 1 else ""
+            cell.Interior.Color = SECTION_FILL
+            cell.Font.Color = _rgb(255, 255, 255)
+            cell.Font.Bold = True
+        row += 1
+
+    def header():
+        nonlocal row
+        for c, name in enumerate(("Action", "What It Does", "Notes / Reversibility"), 1):
+            cell = ws.Cells(row, c)
+            cell.Value = name
+            cell.Interior.Color = HDR_FILL
+            cell.Font.Color = _rgb(255, 255, 255)
+            cell.Font.Bold = True
+        row += 1
+
+    def data_row(values, height=48):
+        nonlocal row
+        for c, val in enumerate(values, 1):
+            cell = ws.Cells(row, c)
+            cell.Value = val
+            cell.WrapText = True
+            cell.VerticalAlignment = -4160  # xlTop
+        ws.Rows(row).RowHeight = height
+        row += 1
+
+    section('TRIAGE SHEET — "Triage Action" column (per-loop, main workflow)')
+    header()
+    for action, what, notes in data["triage"]:
+        data_row([action, what, notes], height=28 if action == "(blank)" else 48)
+
+    row += 1
+    section('SENDER RULES SHEET — "Action" column (per-sender, runs BEFORE '
+            "Claude — no AI cost)")
+    header()
+    for action, what, notes in data["sender_rules"]:
+        data_row([action, what, notes], height=32)
+
+    ws.Columns("A").ColumnWidth = 26
+    ws.Columns("B").ColumnWidth = 78
+    ws.Columns("C").ColumnWidth = 42
+
+
 def _set_config(wb, key: str, value: str) -> None:
     """Write a key/value into the Config sheet of the open workbook."""
     for sheet in wb.Sheets:
@@ -129,6 +245,21 @@ def build_workbook(mailbox: str = "", *, api_key: str = "") -> pathlib.Path:
         if mailbox:
             _set_config(wb, "Mailbox", mailbox)
             print(f"  Mailbox scope written to Config sheet: {mailbox}")
+
+        # Excel.Workbooks.Add() always starts with a blank default sheet;
+        # RunInstall only ever adds named sheets, never removes it.
+        for s in list(wb.Sheets):
+            if s.Name == "Sheet1" and s.UsedRange.Address == "$A$1":
+                s.Delete()
+
+        mailbox_label = ""
+        if mailbox:
+            from cos import mailboxes
+            mb = mailboxes.by_key(mailbox)
+            mailbox_label = mb["label"] if mb else mailbox
+        _write_instructions_sheet(wb, mailbox_label)
+        _write_action_guide_sheet(wb)
+        print("  Instructions + Action Guide sheets written.")
 
         wb.Save()
         wb.Close(SaveChanges=True)

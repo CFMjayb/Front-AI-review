@@ -662,10 +662,40 @@ def _write_action_guide_sheet(wb: openpyxl.Workbook) -> None:
            "out of date.", Font(italic=True, size=10))
     r += 1
 
+    data = action_guide_data()
+
     # ── Triage sheet actions ──────────────────────────────────────────────────
     _section('TRIAGE SHEET — "Triage Action" column (per-loop, main workflow)')
     _header_row()
-    triage_rows = [
+    for action, what, notes in data["triage"]:
+        _data_row([action, what, notes],
+                   height=28 if action == "(blank)" else 48)
+
+    r += 1
+
+    # ── Sender Rules sheet actions ────────────────────────────────────────────
+    _section('SENDER RULES SHEET — "Action" column (per-sender, runs BEFORE '
+             "Claude — no AI cost)")
+    _header_row()
+    for action, what, notes in data["sender_rules"]:
+        _data_row([action, what, notes], height=32)
+
+    # ── Column widths ──────────────────────────────────────────────────────────
+    for ci, (name, width) in enumerate(GUIDE_COLS, 1):
+        ws.column_dimensions[get_column_letter(ci)].width = width
+
+
+def action_guide_data() -> dict:
+    """The Action Guide's actual content, as plain data — no openpyxl
+    dependency, importable by anything that wants to render it (the .xlsx
+    export uses this via _write_action_guide_sheet; create_triage_workbook.py
+    renders the same rows into the .xlsm via win32com). One content source
+    for two renderers, so the two workbook formats can't describe the same
+    action two different ways.
+
+    Delegate-style rows are generated from DELEGATES, not hand-written, so a
+    new "assign to <person>" entry shows up here automatically."""
+    triage = [
         ("done",
          "Marks the loop status=done, then archives the source Front "
          "conversation (skipped if already non-open). Gone from every "
@@ -697,45 +727,36 @@ def _write_action_guide_sheet(wb: openpyxl.Workbook) -> None:
          "Use done/drop/snooze on the deferred row later to actually "
          "close it out. No dedicated \"un-defer\" option exists today."),
     ]
-    for action, what, notes in triage_rows:
-        _data_row([action, what, notes])
 
-    # Delegate-style rows — generated from DELEGATES, not hand-written.
     try:
         from cos_triage_import import DELEGATES as _delegates
     except Exception:
         _delegates = {}
     for action_key, (email, name) in _delegates.items():
-        _data_row([
+        triage.append((
             action_key,
             f"Emails the loop (summary, category, due date, Front link, "
             f"your Notes) to {name} <{email}>. Only resolves the loop as "
             f"done and archives it in Front if the email actually sends.",
             "A failed send leaves the loop OPEN with a warning printed — "
             "it never silently disappears with nobody holding it.",
-        ])
+        ))
 
-    _data_row([
+    triage.append((
         "snooze YYYY-MM-DD / 1d / 3d / 1w / 2w / 1m",
         "Hides the loop from the daily 6 AM briefing email until that "
         "date/duration passes.",
         "IMPORTANT: does NOT hide the loop from the next Refresh Triage — "
         "a snoozed item still reappears on this spreadsheet immediately; "
         "only the email honors the snooze until it expires.",
-    ])
-    _data_row([
+    ))
+    triage.append((
         "(blank)",
         "No status change.",
         "Notes are still saved to the loop if you filled them in.",
-    ], height=28)
+    ))
 
-    r += 1
-
-    # ── Sender Rules sheet actions ────────────────────────────────────────────
-    _section('SENDER RULES SHEET — "Action" column (per-sender, runs BEFORE '
-             "Claude — no AI cost)")
-    _header_row()
-    sender_rows = [
+    sender_rules = [
         ("exclude",
          "That sender never creates a loop at all — skipped before the AI "
          "call.",
@@ -758,12 +779,8 @@ def _write_action_guide_sheet(wb: openpyxl.Workbook) -> None:
          "Removes the rule entirely on next import.",
          "This is a separate column, not an Action value."),
     ]
-    for action, what, notes in sender_rows:
-        _data_row([action, what, notes], height=32)
 
-    # ── Column widths ──────────────────────────────────────────────────────────
-    for ci, (name, width) in enumerate(GUIDE_COLS, 1):
-        ws.column_dimensions[get_column_letter(ci)].width = width
+    return {"triage": triage, "sender_rules": sender_rules}
 
 
 if __name__ == "__main__":
