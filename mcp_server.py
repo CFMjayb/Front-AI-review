@@ -257,39 +257,6 @@ def _loop_to_tsv_row(loop, row_type):
     ])
 
 
-def _parse_snooze_until_cos(value):
-    v = value.strip().lower()
-    now = datetime.datetime.now(datetime.timezone.utc)
-    m = re.match(r"snooze\s+(\d{4}-\d{2}-\d{2})$", v)
-    if m:
-        return m.group(1) + "T00:00:00Z"
-    m = re.match(r"snooze\s+(\d+)([dwm])$", v)
-    if m:
-        n, unit = int(m.group(1)), m.group(2)
-        delta = (datetime.timedelta(days=n) if unit == "d" else
-                 datetime.timedelta(weeks=n) if unit == "w" else
-                 datetime.timedelta(days=n * 30))
-        return (now + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return None
-
-
-def _front_archive(loop_rec):
-    if not loop_rec or loop_rec.get("channel") != "front":
-        return False
-    src = loop_rec.get("source_ref")
-    if not src:
-        return False
-    try:
-        conv = _front().get_conversation(src)
-        if conv.get("status") not in {"open", "assigned", "unassigned"}:
-            return True
-        _front().set_status(src, "archived")
-        return True
-    except Exception as exc:
-        logger.warning("Could not archive Front conversation %s: %s", src, exc)
-        return False
-
-
 @mcp.custom_route("/api/cos/loops", methods=["GET"])
 async def cos_get_loops(request: Request):
     """?mailbox=<key> scopes to one mailbox (see cos/mailboxes.py).
@@ -326,78 +293,94 @@ async def cos_get_loops(request: Request):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
-@mcp.custom_route("/api/cos/triage", methods=["POST"])
-async def cos_triage_action(request: Request):
+@mcp.custom_route("/api/cos/triage/actions", methods=["GET"])
+async def cos_triage_actions(request: Request):
+    """The current Triage Action dropdown list, as plain comma-separated text.
+
+    The ONE place this list is generated (cos_triage_export._triage_action_list,
+    which itself reads DELEGATES from cos_triage_import) — VBA fetches this
+    live on every Refresh instead of carrying its own hardcoded copy, which is
+    exactly how the workbook's dropdown went stale for two months (see
+    feedback_untracked_parallel_implementation, 2026-08-21)."""
     try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-
-    loop_id_val = str(body.get("id") or "").strip()
-    action      = str(body.get("action") or "").strip().lower()
-    notes       = str(body.get("notes") or "").strip()
-
-    if not loop_id_val:
-        return JSONResponse({"error": "id is required"}, status_code=400)
-
-    try:
-        ldr = _cos_ledger()
-        loop_rec = ldr.get_loop(loop_id_val)
-        if not loop_rec:
-            return JSONResponse({"error": "Loop not found"}, status_code=404)
-
-        if notes:
-            existing = loop_rec.get("notes") or ""
-            combined = (existing + "\n" + notes).strip()
-            ldr.patch_loop(loop_id_val, notes=combined)
-
-        if not action:
-            return JSONResponse({"status": "ok", "action": "notes_saved", "id": loop_id_val})
-
-        if action == "done":
-            ldr.resolve_loop(loop_id_val, "done")
-            if _front_archive(loop_rec):
-                ldr.patch_loop(loop_id_val, front_archived=True)
-
-        elif action == "drop":
-            ldr.resolve_loop(loop_id_val, "dropped")
-            if _front_archive(loop_rec):
-                ldr.patch_loop(loop_id_val, front_archived=True)
-
-        elif action == "exclude":
-            ldr.patch_loop(loop_id_val, category="junk")
-            ldr.resolve_loop(loop_id_val, "dropped", reason="excluded:junk")
-            if _front_archive(loop_rec):
-                ldr.patch_loop(loop_id_val, front_archived=True)
-
-        elif action == "subscribe":
-            if loop_rec.get("channel") == "front" and loop_rec.get("source_ref"):
-                try:
-                    _front().add_tag(loop_rec["source_ref"], "cos/reading-list")
-                except Exception as exc:
-                    logger.warning("Could not tag in Front: %s", exc)
-            ldr.resolve_loop(loop_id_val, "dropped", reason="subscribed:reading-list")
-
-        elif action == "fyi":
-            ldr.patch_loop(loop_id_val, fyi=True, deferred=False)
-
-        elif action == "defer":
-            ldr.patch_loop(loop_id_val, deferred=True)
-
-        elif action.startswith("snooze"):
-            until = _parse_snooze_until_cos(action)
-            if not until:
-                return JSONResponse({"error": f"Cannot parse snooze date from '{action}'"}, status_code=400)
-            ldr.snooze_loop(loop_id_val, until)
-
-        else:
-            return JSONResponse({"error": f"Unknown action '{action}'"}, status_code=400)
-
-        return JSONResponse({"status": "ok", "action": action, "id": loop_id_val})
-
+        from cos_triage_export import _triage_action_list
+        from starlette.responses import PlainTextResponse
+        return PlainTextResponse(_triage_action_list())
     except Exception as exc:
-        logger.exception("POST /api/cos/triage failed id=%s action=%s", loop_id_val, action)
+        logger.exception("GET /api/cos/triage/actions failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+# Bucket is the upload's transient holding area, not permanent storage — the
+# blob is deleted right after a clean processing pass and left behind only on
+# failure, for diagnosis. Not mailbox- or user-specific: any properly
+# authenticated caller's workbook lands here under its own timestamped name,
+# so this scales to other people managing their own mailbox later without
+# rework here.
+_COS_TRIAGE_BUCKET = os.environ.get("COS_TRIAGE_BUCKET", "cfm-cos-triage-uploads")
+
+
+def _gcs_bucket():
+    """Lazy import, same reasoning as _cos_ledger() — defer client creation
+    until first use so env vars are fully loaded first."""
+    from google.cloud import storage
+    project = os.environ.get("GCP_PROJECT", "cfm-front-mail")
+    return storage.Client(project=project).bucket(_COS_TRIAGE_BUCKET)
+
+
+@mcp.custom_route("/api/cos/triage/upload", methods=["POST"])
+async def cos_triage_upload(request: Request):
+    """Whole-workbook import: upload the reviewed .xlsx, apply every sheet's
+    changes (Triage + Sender Rules + Guidance) via process_triage_workbook —
+    the one real implementation, shared with the CLI import script — then
+    delete the upload once it processes cleanly.
+
+    Replaces the old row-by-row flow above (POST /api/cos/triage): that path
+    was a second, incomplete copy of the same logic that never learned about
+    delegate actions (found 2026-08-21). This endpoint can't drift from the
+    CLI path because it calls the identical function.
+    """
+    import datetime as _dt
+    import io
+    import uuid
+
+    body = await request.body()
+    if not body:
+        return JSONResponse({"error": "Empty upload"}, status_code=400)
+
+    blob_name = (f"uploads/{_dt.datetime.utcnow():%Y%m%d-%H%M%S}-"
+                 f"{uuid.uuid4().hex[:8]}.xlsx")
+    try:
+        blob = _gcs_bucket().blob(blob_name)
+        blob.upload_from_string(
+            body,
+            content_type="application/vnd.openxmlformats-officedocument"
+                          ".spreadsheetml.sheet",
+        )
+    except Exception as exc:
+        logger.exception("Storing triage upload to GCS failed")
+        return JSONResponse({"error": f"Could not store upload: {exc}"},
+                             status_code=500)
+
+    try:
+        import openpyxl
+        from cos_triage_import import process_triage_workbook
+        wb = openpyxl.load_workbook(io.BytesIO(body))
+        result = process_triage_workbook(wb)
+    except Exception as exc:
+        logger.exception("Processing triage upload failed (kept at %s)", blob_name)
+        return JSONResponse(
+            {"error": str(exc), "kept_in_bucket": blob_name}, status_code=500)
+
+    try:
+        blob.delete()
+    except Exception as exc:
+        # Processed fine — a failed cleanup here is not worth failing the
+        # whole request over, but it's worth knowing about.
+        logger.warning("Processed OK but could not delete upload %s: %s",
+                        blob_name, exc)
+
+    return JSONResponse({"status": "ok", **result})
 
 
 @mcp.custom_route("/api/cos/sender-rules", methods=["GET"])

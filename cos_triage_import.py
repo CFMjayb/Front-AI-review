@@ -101,6 +101,10 @@ DELEGATES: dict[str, tuple[str, str]] = {
     "send to sally":     (os.environ.get("COS_SALLY_EMAIL",
                                          "sswygert@episcopalmaryland.org"),
                           "Sally Swygert"),
+    "assign to joe":     (os.environ.get("COS_JOE_EMAIL", "joe@cfmins.org"),
+                          "Joe"),
+    "assign to troy":    (os.environ.get("COS_TROY_EMAIL", "troy@cfmins.org"),
+                          "Troy"),
 }
 
 
@@ -449,10 +453,15 @@ def _run_all_imports(xlsx_path: str | None = None) -> dict:
     return _run_one_file(xlsx_path)
 
 
-def _run_one_file(xlsx_path: str) -> dict:
-    print(f"Reading: {xlsx_path}")
-    wb = openpyxl.load_workbook(xlsx_path)
-
+def process_triage_workbook(wb: openpyxl.Workbook) -> dict:
+    """Apply every sheet's changes (Triage + Sender Rules + Guidance) from an
+    already-open workbook. This is the one real implementation of "import a
+    reviewed triage file" — both the CLI path (_run_one_file, below) and
+    mcp_server.py's upload endpoint call this directly, so there is exactly
+    one place that knows what an action does. Never re-implement this against
+    a live per-row API again (see the 2026-08-21 finding: the old /api/cos/triage
+    endpoint was a second, incomplete copy of this logic that never learned
+    about delegate actions)."""
     # ── Triage sheet ─────────────────────────────────────────────────────────
     triage_result = _run_triage_sheet(wb)
 
@@ -469,6 +478,12 @@ def _run_one_file(xlsx_path: str) -> dict:
     remaining = len(ledger.list_loops())
     print(f"Active loops remaining in Firestore: {remaining}")
     return {**triage_result, "sender_rules": sr, "guidance": gd}
+
+
+def _run_one_file(xlsx_path: str) -> dict:
+    print(f"Reading: {xlsx_path}")
+    wb = openpyxl.load_workbook(xlsx_path)
+    return process_triage_workbook(wb)
 
 
 if __name__ == "__main__":

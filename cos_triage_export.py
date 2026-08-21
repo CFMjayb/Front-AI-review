@@ -410,6 +410,9 @@ def export(output_path: str | None = None, *, mailbox: str = "",
     # ── Guidance sheet (GUIDANCE-1) ───────────────────────────────────────────
     _write_guidance_sheet(wb)
 
+    # ── Action Guide sheet (full action-option reference) ────────────────────
+    _write_action_guide_sheet(wb)
+
     try:
         wb.save(output_path)
     except PermissionError:
@@ -592,6 +595,175 @@ def _write_guidance_sheet(wb: openpyxl.Workbook) -> None:
         cell = ws.cell(row=ri, column=6, value=line)
         if ri == 1:
             cell.font = Font(bold=True)
+
+
+def _write_action_guide_sheet(wb: openpyxl.Workbook) -> None:
+    """Reference tab: what every Triage Action / Sender Rule Action option
+    actually does, in full detail (the Instructions sheet only has one-line
+    hints). Delegate-style rows (delegate to admin, send to sally, and any
+    future "assign to <person>" entries) are generated straight from
+    cos_triage_import.DELEGATES, so this sheet can't go stale the way a
+    hand-written description would the next time someone is added there."""
+    ws = wb.create_sheet("Action Guide")
+    ws.sheet_properties.tabColor = "6B3AA6"
+    ws.freeze_panes = "A1"
+
+    GUIDE_COLS = [
+        ("Action",                 26),
+        ("What It Does",           78),
+        ("Notes / Reversibility",  42),
+    ]
+    hdr_font     = Font(bold=True, color="FFFFFFFF", size=11)
+    hdr_fill     = PatternFill("solid", fgColor="FF6B3AA6")
+    hdr_align    = Alignment(horizontal="center", vertical="center")
+    title_font   = Font(bold=True, size=14)
+    section_font = Font(bold=True, size=11, color="FFFFFFFF")
+    section_fill = PatternFill("solid", fgColor="FF444466")
+    wrap         = Alignment(vertical="top", wrap_text=True)
+
+    r = 1
+
+    def _title(text: str, font: Font):
+        nonlocal r
+        ws.cell(r, 1, text).font = font
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=3)
+        r += 1
+
+    def _section(text: str):
+        nonlocal r
+        for c in range(1, 4):
+            cell = ws.cell(r, c, text if c == 1 else "")
+            cell.font = section_font
+            cell.fill = section_fill
+        r += 1
+
+    def _header_row():
+        nonlocal r
+        for ci, (name, _) in enumerate(GUIDE_COLS, 1):
+            cell = ws.cell(r, ci, name)
+            cell.font = hdr_font
+            cell.fill = hdr_fill
+            cell.alignment = hdr_align
+            cell.border = BORDER
+        r += 1
+
+    def _data_row(values, *, height=48):
+        nonlocal r
+        for ci, val in enumerate(values, 1):
+            cell = ws.cell(r, ci, val)
+            cell.alignment = wrap
+            cell.border = BORDER
+        ws.row_dimensions[r].height = height
+        r += 1
+
+    _title("Triage Workbook — Action Guide", title_font)
+    _title("What each dropdown option actually does, generated to match the "
+           "real import code — not a hand-written summary that can drift "
+           "out of date.", Font(italic=True, size=10))
+    r += 1
+
+    # ── Triage sheet actions ──────────────────────────────────────────────────
+    _section('TRIAGE SHEET — "Triage Action" column (per-loop, main workflow)')
+    _header_row()
+    triage_rows = [
+        ("done",
+         "Marks the loop status=done, then archives the source Front "
+         "conversation (skipped if already non-open). Gone from every "
+         "future export and the briefing.",
+         "Not reversible from this sheet."),
+        ("drop",
+         "Same mechanics as done (status=dropped + archive) — a different "
+         "status label for reporting, same end result: gone for good.",
+         "Not reversible."),
+        ("exclude",
+         "drop, plus tags the loop category=junk first — the \"train it "
+         "not to bring me this again\" option.",
+         "Not reversible. Sender-level filtering going forward is a "
+         "separate mechanism — see the Sender Rules section below."),
+        ("subscribe",
+         "Tags the Front conversation cos/reading-list (so you can find it "
+         "again in Front), then resolves it dropped.",
+         "For \"no action needed, but keep it findable.\" Not reversible "
+         "from this sheet."),
+        ("fyi",
+         "Does NOT resolve the loop. Sets fyi=True — it goes grey and "
+         "moves to the FYI bucket in the next export/briefing, but stays "
+         "open in the ledger.",
+         "No dedicated \"un-fyi\" option exists in the dropdown today."),
+        ("defer",
+         "Does NOT resolve the loop. Sets deferred=True — moves to the "
+         "blue \"Deferred — Review Later\" section at the bottom of the "
+         "sheet and drops out of the briefing's main sections.",
+         "Use done/drop/snooze on the deferred row later to actually "
+         "close it out. No dedicated \"un-defer\" option exists today."),
+    ]
+    for action, what, notes in triage_rows:
+        _data_row([action, what, notes])
+
+    # Delegate-style rows — generated from DELEGATES, not hand-written.
+    try:
+        from cos_triage_import import DELEGATES as _delegates
+    except Exception:
+        _delegates = {}
+    for action_key, (email, name) in _delegates.items():
+        _data_row([
+            action_key,
+            f"Emails the loop (summary, category, due date, Front link, "
+            f"your Notes) to {name} <{email}>. Only resolves the loop as "
+            f"done and archives it in Front if the email actually sends.",
+            "A failed send leaves the loop OPEN with a warning printed — "
+            "it never silently disappears with nobody holding it.",
+        ])
+
+    _data_row([
+        "snooze YYYY-MM-DD / 1d / 3d / 1w / 2w / 1m",
+        "Hides the loop from the daily 6 AM briefing email until that "
+        "date/duration passes.",
+        "IMPORTANT: does NOT hide the loop from the next Refresh Triage — "
+        "a snoozed item still reappears on this spreadsheet immediately; "
+        "only the email honors the snooze until it expires.",
+    ])
+    _data_row([
+        "(blank)",
+        "No status change.",
+        "Notes are still saved to the loop if you filled them in.",
+    ], height=28)
+
+    r += 1
+
+    # ── Sender Rules sheet actions ────────────────────────────────────────────
+    _section('SENDER RULES SHEET — "Action" column (per-sender, runs BEFORE '
+             "Claude — no AI cost)")
+    _header_row()
+    sender_rows = [
+        ("exclude",
+         "That sender never creates a loop at all — skipped before the AI "
+         "call.",
+         "Can be scoped further with a Subject Pattern, e.g. so a shared "
+         "mailbox is excluded only for one kind of notification."),
+        ("fyi",
+         "Every future loop from that sender is automatically FYI, "
+         "skipping AI urgency judgment.",
+         ""),
+        ("force-category",
+         "Loop is created normally, but its Category is overridden to "
+         "whatever is entered in the Category column.",
+         ""),
+        ("subscribe",
+         "Same reading-list-and-drop behavior as the Triage sheet's "
+         "subscribe, applied automatically to every loop from that "
+         "sender.",
+         ""),
+        ("_delete = yes",
+         "Removes the rule entirely on next import.",
+         "This is a separate column, not an Action value."),
+    ]
+    for action, what, notes in sender_rows:
+        _data_row([action, what, notes], height=32)
+
+    # ── Column widths ──────────────────────────────────────────────────────────
+    for ci, (name, width) in enumerate(GUIDE_COLS, 1):
+        ws.column_dimensions[get_column_letter(ci)].width = width
 
 
 if __name__ == "__main__":
