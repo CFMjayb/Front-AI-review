@@ -24,37 +24,56 @@ Public Sub RunInstall()
     ' Ensure Config sheet exists
     GetConfig "ServerUrl"
 
+    EnsureSheet "Controls",     RGB(85, 85, 85)
     EnsureSheet "Triage",       RGB(44, 95, 138)
     EnsureSheet "Sender Rules", RGB(192, 90, 0)
     EnsureSheet "Guidance",     RGB(26, 107, 58)
 
-    Dim wsTriage As Worksheet: Set wsTriage = ThisWorkbook.Sheets("Triage")
-    Dim wsSR     As Worksheet: Set wsSR     = ThisWorkbook.Sheets("Sender Rules")
-    Dim wsGuid   As Worksheet: Set wsGuid   = ThisWorkbook.Sheets("Guidance")
+    Dim wsControls As Worksheet: Set wsControls = ThisWorkbook.Sheets("Controls")
+    Dim wsTriage   As Worksheet: Set wsTriage   = ThisWorkbook.Sheets("Triage")
 
-    ' Triage sheet buttons (positioned top-right, above data columns)
-    AddButton wsTriage, "Refresh Triage",       "modTriage.RefreshTriage",        630, 2, 130, 20
-    AddButton wsTriage, "Upload for Processing", "modTriage.UploadForProcessing", 770, 2, 150, 20
-    AddButton wsTriage, "Send Briefing",        "modBriefing.SendBriefing",       930, 2, 110, 20
+    ' Every button lives on Controls, never on a data sheet — a button
+    ' sitting on top of Triage's own columns is exactly what disappeared
+    ' under real loaded data (found 2026-08-21). See modControls.bas.
+    SetupControlsSheet wsControls
 
-    ' Sender Rules sheet buttons
-    AddButton wsSR, "Refresh",  "modSenderRules.RefreshSenderRules", 480, 2, 100, 20
-    AddButton wsSR, "Save",     "modSenderRules.SaveSenderRules",    590, 2,  80, 20
+    ' Row 1: Triage actions. Top=45 clears the two header-text rows above
+    ' (measured cumulative height ~32px) with a real margin, not a guess.
+    AddButton wsControls, "Refresh All",           "modControls.BtnRefreshAll_Click",           10,  45, 130, 26
+    AddButton wsControls, "Refresh Triage",        "modControls.BtnRefreshTriage_Click",        150, 45, 130, 26
+    AddButton wsControls, "Upload for Processing", "modControls.BtnUploadForProcessing_Click",  290, 45, 160, 26
+    AddButton wsControls, "Send Briefing",         "modControls.BtnSendBriefing_Click",         460, 45, 120, 26
 
-    ' Guidance sheet buttons
-    AddButton wsGuid, "Refresh", "modGuidance.RefreshGuidance",  630, 2, 100, 20
-    AddButton wsGuid, "Save",    "modGuidance.SaveGuidance",     740, 2,  80, 20
+    ' Row 2: Sender Rules + Guidance, refresh/save pairs
+    AddButton wsControls, "Refresh Sender Rules",  "modControls.BtnRefreshSenderRules_Click",   10,  85, 160, 26
+    AddButton wsControls, "Save Sender Rules",     "modControls.BtnSaveSenderRules_Click",      180, 85, 130, 26
+    AddButton wsControls, "Refresh Guidance",      "modControls.BtnRefreshGuidance_Click",      320, 85, 140, 26
+    AddButton wsControls, "Save Guidance",         "modControls.BtnSaveGuidance_Click",         470, 85, 110, 26
 
-    wsTriage.Activate
+    wsControls.Activate
 
     Application.ScreenUpdating = True
     If Not SuppressCompletionMsgBox Then
-        MsgBox "Workbook ready." & vbCrLf & vbCrLf & _
-               "Click 'Refresh Triage' to load your loops." & vbCrLf & _
-               "Click 'Upload for Processing' once you've filled in Triage Actions." & vbCrLf & _
-               "Click 'Send Briefing' to send yourself a briefing now.", _
+        MsgBox "Workbook ready — start on the Controls tab." & vbCrLf & vbCrLf & _
+               "Click 'Refresh All' to load everything, or refresh one section at " & _
+               "a time." & vbCrLf & _
+               "Fill in Triage Actions on the Triage tab, then come back to " & _
+               "Controls and click 'Upload for Processing.'" & vbCrLf & _
+               "'Send Briefing' sends yourself a briefing on demand.", _
                vbInformation, "CoS Triage Workbook"
     End If
+End Sub
+
+
+Private Sub SetupControlsSheet(ws As Worksheet)
+    ws.Cells(1, 1).Value = "CoS Triage Workbook — Controls"
+    ws.Cells(1, 1).Font.Bold = True
+    ws.Cells(1, 1).Font.Size = 14
+    ws.Cells(2, 1).Value = "Every button lives here. Refresh All pulls Triage + " & _
+        "Sender Rules + Guidance in one click; each section also has its own " & _
+        "Refresh/Save if you only need one."
+    ws.Cells(2, 1).Font.Italic = True
+    ws.Columns("A").ColumnWidth = 100
 End Sub
 
 

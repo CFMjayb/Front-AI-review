@@ -39,6 +39,7 @@ BAS_FILES = [
     "modSenderRules.bas",
     "modGuidance.bas",
     "modBriefing.bas",
+    "modControls.bas",
     "modInstall.bas",
 ]
 
