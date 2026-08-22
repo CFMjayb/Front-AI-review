@@ -110,6 +110,18 @@ def gather_by_mailbox() -> list[tuple[str, dict]]:
 
 _URGENCY_EMOJI = {"urgent": "🔴", "high": "🟠", "normal": "🟡", "low": "⚪"}
 
+# The email body only lists urgent+high items — Jay's direct call (2026-08-22)
+# after the real counts came back: "urgent" alone is only 3 of 100 active
+# loops (too sparse most days), "urgent + high" is 40 of 100, a real cut
+# without losing everything genuinely pressing. Normal/low/FYI still count
+# toward each mailbox's total, they just aren't spelled out line by line —
+# that's what the attached workbook is for.
+_BODY_URGENCY_TIERS = {"urgent", "high"}
+
+
+def _is_body_urgent(loop: dict) -> bool:
+    return (loop.get("urgency") or "normal").lower() in _BODY_URGENCY_TIERS
+
 
 def _loop_line(loop: dict) -> str:
     num     = loop.get("num")
@@ -153,16 +165,21 @@ def render(sections: dict, *, date: str = "", headline: str = "", closing: str =
     subject = (f"☀️ Your day — {date} · {len(on_you)} on you · "
                f"{len(waiting)} waiting · {len(events)} meetings")
 
+    urgent_on_you = [l for l in on_you if _is_body_urgent(l)]
+    urgent_waiting = [l for l in waiting if _is_body_urgent(l)]
+
     lines = [f"# Your day — {date}", ""]
     if headline:
         lines += [headline, ""]
+    lines += ["_Showing urgent/high-priority items only — the rest (normal/low "
+              "priority, FYI) is in the attached workbook._", ""]
 
-    lines.append(f"## 🔴 On you ({len(on_you)})")
-    lines += [f"- {_loop_line(l)}" for l in on_you] or ["_Nothing on you. Enjoy it._"]
+    lines.append(f"## 🔴 On you — urgent/high ({len(urgent_on_you)} of {len(on_you)})")
+    lines += [f"- {_loop_line(l)}" for l in urgent_on_you] or ["_Nothing urgent or high on you._"]
     lines.append("")
 
-    lines.append(f"## ⏳ Waiting on others — quiet 36 h+ ({len(waiting)})")
-    lines += [f"- {_loop_line(l)}" for l in waiting] or ["_Nothing outstanding._"]
+    lines.append(f"## ⏳ Waiting on others — urgent/high ({len(urgent_waiting)} of {len(waiting)})")
+    lines += [f"- {_loop_line(l)}" for l in urgent_waiting] or ["_Nothing urgent or high outstanding._"]
     lines.append("")
 
     if events:
@@ -177,17 +194,17 @@ def render(sections: dict, *, date: str = "", headline: str = "", closing: str =
             lines.append(f"- ⚠️ {len(conflicts)} meeting(s) overlap — check your schedule.")
         lines.append("")
 
-    if sections["new"]:
-        lines.append(f"## 🆕 New since yesterday ({len(sections['new'])})")
-        lines += [f"- {_loop_line(l)}" for l in sections["new"]]
+    urgent_new = [l for l in sections["new"] if _is_body_urgent(l)]
+    if urgent_new:
+        lines.append(f"## 🆕 New and urgent/high ({len(urgent_new)})")
+        lines += [f"- {_loop_line(l)}" for l in urgent_new]
         lines.append("")
 
     fyi = sections.get("fyi", [])
-    if fyi:
-        lines.append(f"## 📋 FYI — auto-clears in 24h ({len(fyi)})")
-        lines.append("_Notifications / cc's / newsletters. Act on any you care about; "
-                     "the rest clear automatically._")
-        lines += [f"- {_loop_line(l)}" for l in fyi]
+    rest = (len(on_you) - len(urgent_on_you)) + (len(waiting) - len(urgent_waiting)) + len(fyi)
+    if rest:
+        lines.append(f"_{rest} more item(s) — normal/low priority and FYI — in the "
+                     f"attached workbook._")
         lines.append("")
 
     if filtered_count is not None:
@@ -204,12 +221,22 @@ def render(sections: dict, *, date: str = "", headline: str = "", closing: str =
 
 def _mailbox_block(key: str, sections: dict) -> list[str]:
     """One mailbox's section of the email. Headings are one level deeper than the
-    mailbox heading itself so the mailbox stays the visual unit."""
+    mailbox heading itself so the mailbox stays the visual unit.
+
+    Only urgent+high items are listed — the full list (every urgency, every
+    FYI) is too long to read in an email body (Jay, 2026-08-22, after real
+    counts showed 100 active loops). Non-urgent items still count toward the
+    totals shown, they're just not spelled out line by line; the attached
+    workbook has everything."""
     mb = mailboxes.by_key(key) or {}
     label = mb.get("label") or mailboxes.UNASSIGNED_LABEL
     address = mb.get("address") or ""
     on_you, waiting = sections["on_you"], sections["waiting"]
     fyi, new = sections.get("fyi", []), sections.get("new", [])
+
+    urgent_on_you = [l for l in on_you if _is_body_urgent(l)]
+    urgent_waiting = [l for l in waiting if _is_body_urgent(l)]
+    urgent_new = [l for l in new if _is_body_urgent(l)]
 
     head = f"## 📬 {label}"
     if address:
@@ -217,22 +244,23 @@ def _mailbox_block(key: str, sections: dict) -> list[str]:
     head += f" · {len(on_you)} on you · {len(waiting)} waiting"
     lines = [head, ""]
 
-    lines.append(f"### 🔴 On you ({len(on_you)})")
-    lines += [f"- {_loop_line(l)}" for l in on_you] or ["_Nothing on you here._"]
+    lines.append(f"### 🔴 On you — urgent/high ({len(urgent_on_you)} of {len(on_you)})")
+    lines += [f"- {_loop_line(l)}" for l in urgent_on_you] or ["_Nothing urgent or high on you here._"]
     lines.append("")
 
-    lines.append(f"### ⏳ Waiting on others — quiet 36 h+ ({len(waiting)})")
-    lines += [f"- {_loop_line(l)}" for l in waiting] or ["_Nothing outstanding._"]
+    lines.append(f"### ⏳ Waiting on others — urgent/high ({len(urgent_waiting)} of {len(waiting)})")
+    lines += [f"- {_loop_line(l)}" for l in urgent_waiting] or ["_Nothing urgent or high outstanding._"]
     lines.append("")
 
-    if new:
-        lines.append(f"### 🆕 New since yesterday ({len(new)})")
-        lines += [f"- {_loop_line(l)}" for l in new]
+    if urgent_new:
+        lines.append(f"### 🆕 New and urgent/high ({len(urgent_new)})")
+        lines += [f"- {_loop_line(l)}" for l in urgent_new]
         lines.append("")
 
-    if fyi:
-        lines.append(f"### 📋 FYI — auto-clears in 24h ({len(fyi)})")
-        lines += [f"- {_loop_line(l)}" for l in fyi]
+    rest = (len(on_you) - len(urgent_on_you)) + (len(waiting) - len(urgent_waiting)) + len(fyi)
+    if rest:
+        lines.append(f"_{rest} more item(s) here — normal/low priority and FYI — "
+                     f"in the attached workbook._")
         lines.append("")
 
     return lines
@@ -256,6 +284,8 @@ def render_all(per_mailbox: list[tuple[str, dict]], shared: dict, *,
     lines = [f"# Your day — {date}", ""]
     if headline:
         lines += [headline, ""]
+    lines += ["_Showing urgent/high-priority items only — the rest (normal/low "
+              "priority, FYI) is in the attached workbook(s)._", ""]
 
     # One-line index so the mailbox split is visible before scrolling.
     if len(per_mailbox) > 1:

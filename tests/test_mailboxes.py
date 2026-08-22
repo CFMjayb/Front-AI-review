@@ -134,9 +134,14 @@ def test_render_all_has_a_section_per_mailbox(mods):
     # Subject reports the all-mailbox totals, not one mailbox's.
     assert "3 on you" in subject
     assert "1 waiting" in subject
-    # Every loop still appears somewhere — a split must not drop anything.
+    # 2026-08-22: the body only names urgent/high items; none of the seeded
+    # loops set urgency (defaults to "normal"), so none should be named by
+    # text — they're still accounted for via each mailbox's "more item(s)"
+    # count instead. A split must not silently drop a loop from that count,
+    # even though it no longer prints the loop's own name.
     for who in ("Canon Sulerud", "Bob", "Vendor", "Legacy"):
-        assert who in body
+        assert who not in body
+    assert "more item(s)" in body
 
 
 def test_render_all_totals_match_the_sum_of_sections(mods):

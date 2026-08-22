@@ -17,10 +17,12 @@ def mods(tmp_path, monkeypatch):
 
 
 def _seed(ledger):
+    # urgency="high" (2026-08-22): the body only lists urgent/high items now,
+    # so this needs a real tier to keep exercising due-date/link rendering.
     ledger.upsert_loop(direction="i_owe", counterparty="Canon Sulerud",
                        summary="Confirm processional order", channel="front",
                        source_ref="cnv_1", source_link="https://app.frontapp.com/open/cnv_1",
-                       importance=4, due_at="2026-06-04")
+                       importance=4, due_at="2026-06-04", urgency="high")
     ledger.upsert_loop(direction="i_owe", counterparty="St. Anne's vestry",
                        summary="Approve rental waiver", channel="front",
                        source_ref="cnv_2", importance=3)
@@ -54,7 +56,10 @@ def test_render_includes_loops_and_links(mods):
     assert "(due 2026-06-04)" in body
     assert "https://app.frontapp.com/open/cnv_1" in body
     assert "18** marketing" in body
-    assert "🔴 On you (2)" in body
+    # Only Canon Sulerud is urgency="high" -- St. Anne's vestry (normal) is
+    # folded into the "more item(s)" count instead of named (2026-08-22).
+    assert "🔴 On you — urgent/high (1 of 2)" in body
+    assert "St. Anne's vestry" not in body
 
 
 def test_importance_orders_on_you(mods):
@@ -68,7 +73,9 @@ def test_empty_ledger_renders_gracefully(mods):
     ledger, briefing = mods
     subject, body = briefing.render(briefing.gather(), date="2026-06-02")
     assert "0 on you" in subject
-    assert "Nothing on you" in body
+    # 2026-08-22: body only lists urgent/high items now, so the empty-state
+    # wording changed to match — an empty ledger has nothing urgent either.
+    assert "Nothing urgent or high on you" in body
 
 
 def test_resolved_loops_excluded(mods):
