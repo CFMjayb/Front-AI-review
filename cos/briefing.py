@@ -313,38 +313,59 @@ def _narrate(sections: dict, claude) -> tuple[str, str]:
         return _narrate(sections, None)
 
 
-_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_XLSM_MIME = "application/vnd.ms-excel.sheet.macroEnabled.12"
+_TEMPLATE_BUCKET = os.environ.get("COS_TRIAGE_BUCKET", "cfm-cos-triage-uploads")
 
 
 def _build_triage_attachment() -> list[dict] | None:
-    """Export the Triage workbooks (same ones used for manual review) — one per
-    mailbox — and return them as send()-ready attachments.
+    """Attach the same static, macro-enabled Triage workbooks staff use for
+    manual review — one per registered mailbox — fetched from a fixed GCS
+    location, not regenerated here.
 
-    Failure here must never block the briefing email itself; it just goes out
-    with fewer attachments, or none. A single mailbox failing to export does not
-    cost the others their workbook.
+    These are deliberately NOT rebuilt per-send: Cloud Run has no Excel to
+    run the COM automation that builds a .xlsm's VBA project and buttons, so
+    each workbook is built once locally (create_triage_workbook.py) and
+    uploaded to GCS. A Workbook_Open event bakes in its own auto-refresh, so
+    the same static file still shows that day's real data the instant it's
+    opened — see modControls.AutoRefreshOnOpen. Rebuild and re-upload a
+    mailbox's template if the mailbox registry changes (a new key, a
+    relabeled one) or if the baked-in MCP API key rotates; nothing here
+    detects either condition on its own.
+
+    Failure here must never block the briefing email itself; it just goes
+    out with fewer attachments, or none. One mailbox's template missing from
+    the bucket does not cost the others theirs.
     """
     try:
         import base64
-        from pathlib import Path as _Path
-        from cos_triage_export import export_all
-        written = export_all()
+        from google.cloud import storage
+        from cos import mailboxes
     except Exception as exc:
-        logger.warning("Triage workbook export failed, sending briefing without "
-                       "attachments: %s", exc)
+        logger.warning("Triage workbook attachment setup failed, sending "
+                       "briefing without attachments: %s", exc)
+        return None
+
+    try:
+        bucket = storage.Client().bucket(_TEMPLATE_BUCKET)
+    except Exception as exc:
+        logger.warning("Could not reach GCS bucket %s for triage workbook "
+                       "templates: %s", _TEMPLATE_BUCKET, exc)
         return None
 
     attachments: list[dict] = []
-    for key, path in written:
+    for mb in mailboxes.mailboxes(include_unassigned=False):
+        name = f"CoS Triage Workbook - {mailboxes.slug(mb['key'])}.xlsm"
+        blob_name = f"templates/{name}"
         try:
-            data = _Path(path).read_bytes()
+            data = bucket.blob(blob_name).download_as_bytes()
             attachments.append({
-                "name": _Path(path).name,
-                "content_type": _XLSX_MIME,
+                "name": name,
+                "content_type": _XLSM_MIME,
                 "content_base64": base64.b64encode(data).decode("ascii"),
             })
         except Exception as exc:
-            logger.warning("Could not attach %s workbook (%s): %s", key, path, exc)
+            logger.warning("Could not attach %s workbook template (%s): %s",
+                           mb["key"], blob_name, exc)
     return attachments or None
 
 
