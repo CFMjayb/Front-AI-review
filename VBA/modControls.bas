@@ -43,3 +43,20 @@ End Sub
 Public Sub BtnSendBriefing_Click()
     modBriefing.SendBriefing
 End Sub
+
+' Called from ThisWorkbook's Workbook_Open event (inserted at build time by
+' create_triage_workbook.py — VBA's ThisWorkbook is a special object module,
+' code is inserted into it directly, not imported as a .bas file). Lets a
+' single static, unchanging .xlsm be emailed every day and still show that
+' day's real data the moment it's opened — no server-side regeneration
+' needed, since Refresh already pulls live from the API on every call.
+' Deliberately silent (no completion MsgBox) — the whole point is that
+' opening the file just works, with nothing to click through first.
+Public Sub AutoRefreshOnOpen()
+    On Error Resume Next
+    modTriage.RefreshTriage
+    modSenderRules.RefreshSenderRules
+    modGuidance.RefreshGuidance
+    ThisWorkbook.Sheets("Triage").Activate
+    On Error GoTo 0
+End Sub

@@ -253,6 +253,21 @@ def build_workbook(mailbox: str = "", *, api_key: str = "") -> pathlib.Path:
             if s.Name == "Sheet1" and s.UsedRange.Address == "$A$1":
                 s.Delete()
 
+        # ThisWorkbook is a special object module that already exists in
+        # every workbook -- code is inserted into it directly, never
+        # imported as a .bas file the way every other module here is. This
+        # is what lets a single static, unchanging .xlsm be emailed every
+        # day and still show live data the moment it's opened.
+        this_wb = wb.VBProject.VBComponents("ThisWorkbook")
+        this_wb.CodeModule.AddFromString(
+            "Private Sub Workbook_Open()\n"
+            "    On Error Resume Next\n"
+            "    modControls.AutoRefreshOnOpen\n"
+            "    On Error GoTo 0\n"
+            "End Sub\n"
+        )
+        print("  Workbook_Open (auto-refresh on open) inserted.")
+
         mailbox_label = ""
         if mailbox:
             from cos import mailboxes
