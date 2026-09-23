@@ -33,6 +33,12 @@ _MAILBOX_HINT = "_cos_mailbox"
 # Set PLAUD_ENABLED=true to turn it back on; modules/plaud_extract.py is intact.
 PLAUD_ENABLED = os.environ.get("PLAUD_ENABLED", "false").lower() == "true"
 
+# M4 clustering turned off 2026-09-22 (Jay). It invented a near-duplicate
+# cluster/* tag name almost every run (647 of the account's 1,208 tags) and paid
+# a Claude call per run for it. Disabled, not deleted: CLUSTER_ENABLED=true
+# turns it back on; modules/m4_cluster.py is intact.
+CLUSTER_ENABLED = os.environ.get("CLUSTER_ENABLED", "false").lower() == "true"
+
 # Front has no literal "open" status — an open conversation is assigned OR
 # unassigned (as opposed to archived / deleted / trashed / spam).
 _OPEN_STATUSES = {"open", "assigned", "unassigned"}
@@ -495,7 +501,7 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
     # M4 cluster — runs over the full batch after individual conversations
     m4_result = None
     processed_results = [r for r in results if not r["errored"] and not r.get("prefiltered")]
-    if len(processed_results) >= 2:
+    if CLUSTER_ENABLED and len(processed_results) >= 2:
         logger.info(f"Running M4 cluster over {len(processed_results)} conversations")
         try:
             m4_result = m4_cluster.run(processed_results, claude, front, dry_run=dry_run)
