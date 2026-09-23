@@ -130,7 +130,7 @@ def analyze_transcript(claude, *, subject: str, sender: str, transcript: str) ->
     user_prompt = f"Subject: {subject}\nFrom: {sender}\n\nTranscript:\n{transcript}"
     res = claude.call(
         system=_build_system(), user=user_prompt, model=_get_model(claude),
-        max_tokens=1200, json_mode=True, cached_system=True,
+        max_tokens=2500, json_mode=True, cached_system=True,
     )
     data = res.get("json")
     if not data or data.get("category") not in CATEGORIES:
@@ -142,8 +142,8 @@ def analyze_transcript(claude, *, subject: str, sender: str, transcript: str) ->
 def run(ctx: dict, claude, front) -> dict:
     first_msg = (ctx.get("messages") or [{}])[0]
     subject = ctx["conv"].get("subject") or "(no subject)"
-    author = first_msg.get("author") or {}
-    sender = author.get("email") or author.get("handle") or "unknown"
+    from modules.prefilter import _sender
+    sender = _sender(first_msg) or "unknown"
 
     user_prompt = f"Subject: {subject}\nFrom: {sender}\n\nTranscript:\n{ctx['transcript']}"
 
@@ -151,7 +151,10 @@ def run(ctx: dict, claude, front) -> dict:
         system=_build_system(),
         user=user_prompt,
         model=_get_model(claude),
-        max_tokens=1200,
+        # 1200 truncated the JSON on long threads (daily-report emails), which
+        # failed the parse, skipped the processed tag, and re-billed the same
+        # conversations every 30-min run. 2500 leaves real headroom.
+        max_tokens=2500,
         json_mode=True,
         cached_system=True,
     )

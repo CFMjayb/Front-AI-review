@@ -36,6 +36,7 @@ PLAUD_ENABLED = os.environ.get("PLAUD_ENABLED", "false").lower() == "true"
 # Front has no literal "open" status — an open conversation is assigned OR
 # unassigned (as opposed to archived / deleted / trashed / spam).
 _OPEN_STATUSES = {"open", "assigned", "unassigned"}
+ANALYZE_FAILED_TAG = "AI/analyze-failed"
 
 REQUIRED_TAGS: list[tuple[str, Optional[str]]] = [
     (PROCESSED_TAG, "blue"),
@@ -398,7 +399,17 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
                     else:
                         logger.error(f"{cid} PROCESSED_TAG could not be applied after retry: {tag_exc}")
                         raise  # propagate so the conversation is counted as errored
-        elif dry_run:
+        elif not dry_run:
+            # A failed analysis must not leave the conversation untagged — the
+            # gate would re-pick it and re-bill it on every run, forever (seen
+            # 2026-09-22: 23 conversations re-analyzed each 30-min run). Mark it
+            # failed + processed once; search AI/analyze-failed to review them.
+            try:
+                front.add_tag(cid, ANALYZE_FAILED_TAG)
+                front.add_tag(cid, PROCESSED_TAG)
+            except Exception as tag_exc:
+                logger.error(f"{cid} could not tag failed analysis: {tag_exc}")
+        else:
             logger.info(f"[dry-run] would apply {PROCESSED_TAG} to {cid}")
 
         # CoS open-loop extraction — reuses the analysis above, no extra Claude cost

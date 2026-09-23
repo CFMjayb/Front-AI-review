@@ -115,8 +115,16 @@ def is_calendar_response(conv: dict) -> bool:
 
 
 def _sender(msg: dict) -> str:
+    # Front only sets `author` for teammate-written messages. Inbound email from
+    # outside has author=None and carries the sender as the recipient with
+    # role "from" — reading author alone made every sender rule a silent no-op
+    # for external mail (found 2026-09-22).
     author = msg.get("author") or {}
-    return (author.get("email") or author.get("handle") or "").strip().lower()
+    email = author.get("email") or author.get("handle") or ""
+    if not email:
+        email = next((r.get("handle") or "" for r in msg.get("recipients") or []
+                      if r.get("role") == "from"), "")
+    return email.strip().lower()
 
 
 def sender_rule_skip(conv: dict, messages: list[dict]) -> tuple[bool, dict | None, str]:

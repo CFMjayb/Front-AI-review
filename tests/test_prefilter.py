@@ -93,3 +93,40 @@ def test_normal_subject_is_not_a_calendar_response():
 def test_calendar_response_respects_disable_flag(monkeypatch):
     monkeypatch.setenv("SPAM_PREFILTER", "false")
     assert not is_calendar_response(_conv(subject="Declined: Budget review"))
+
+
+# --- sender_rule_skip: real Front inbound shape (author=None) -------------------
+# Regression for 2026-09-22: _sender() read only `author`, which Front leaves
+# null on inbound email, so no exclude/fyi rule ever fired before the AI call.
+from modules import prefilter as _pf
+
+
+def _inbound(from_handle, author=None):
+    return {"is_inbound": True, "created_at": 1, "author": author,
+            "recipients": [{"handle": "jay@cfmins.org", "role": "to"},
+                           {"handle": from_handle, "role": "from"}]}
+
+
+def test_sender_read_from_recipients_when_author_is_null():
+    assert _pf._sender(_inbound("Notifications@CFMins.org")) == "notifications@cfmins.org"
+
+
+def test_teammate_author_still_wins():
+    msg = _inbound("x@y.com", author={"email": "jay@cfmins.org"})
+    assert _pf._sender(msg) == "jay@cfmins.org"
+
+
+def test_exclude_rule_fires_for_real_inbound_shape(monkeypatch):
+    from cos import extract as cos_extract
+    monkeypatch.setattr(cos_extract, "sender_rule_action",
+                        lambda e: {"action": "exclude"} if e == "notifications@cfmins.org" else None)
+    skip, rule, sender = _pf.sender_rule_skip({"subject": "CFM Daily Processing"},
+                                             [_inbound("notifications@cfmins.org")])
+    assert skip and rule["action"] == "exclude" and sender == "notifications@cfmins.org"
+
+
+def test_unruled_inbound_sender_not_skipped(monkeypatch):
+    from cos import extract as cos_extract
+    monkeypatch.setattr(cos_extract, "sender_rule_action", lambda e: None)
+    skip, _, sender = _pf.sender_rule_skip({"subject": "hi"}, [_inbound("person@parish.org")])
+    assert not skip and sender == "person@parish.org"
