@@ -339,11 +339,15 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
                     )
                 front.add_tag(cid, f"AI/sender-rule-{sr_action}")
                 front.add_tag(cid, PROCESSED_TAG)
-                if sr_action == "exclude":
+                if sr_action == "exclude" and not sr_rule.get("keep_in_front"):
                     # No loop is created for "exclude" (unlike "fyi", which makes
                     # a visible, auto-clearing loop on purpose) — nothing will
                     # ever surface this conversation, so leaving it open in
                     # Front just strands it. Archive it now.
+                    # keep_in_front=true on the rule (2026-09-23) skips the
+                    # archive: for mail Jay reads in Front himself but that must
+                    # never go to the AI, e.g. our own notifications@cfmins.org
+                    # daily emails, which this path was silently archiving.
                     from cos import front_archive
                     front_archive.archive_conversation(front, cid, label=cid)
             else:
