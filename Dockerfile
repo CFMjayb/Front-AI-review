@@ -1,4 +1,9 @@
 FROM python:3.12-slim
+# Apply Debian security updates published since the base image was built.
+# Added 2026-09-30 for CVE-2026-84782 (openssl, HIGH): the scanner flagged it
+# as fixable once Debian shipped the patch, but the slim base had not been
+# refreshed yet. Upgrading here clears that class on every rebuild.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
 # Closes CVE-2026-24049 (wheel) / CVE-2026-23949 (jaraco.context). The scanner
 # flags the copies vendored INSIDE the base image's setuptools
 # (setuptools/_vendor/wheel-0.45.1, jaraco.context-5.3.0), so upgrading the
