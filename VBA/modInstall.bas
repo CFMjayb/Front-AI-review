@@ -8,12 +8,12 @@ Option Explicit
 ' automation (xl.Visible = False, as the build script uses) nothing can click
 ' it, so xl.Run("modInstall.RunInstall") hangs forever with no way to recover
 ' short of killing the Excel process. Same root cause already fixed for the
-' 26-125 PG Data Review workbook — set this True before calling RunInstall
+' 26-125 PG Data Review workbook - set this True before calling RunInstall
 ' from a script; leave it False (default) for a real interactive run.
 Public SuppressCompletionMsgBox As Boolean
 
 ' Application.Run can only invoke a Sub/Function, not assign a public
-' variable directly — this setter is what create_triage_workbook.py calls.
+' variable directly - this setter is what create_triage_workbook.py calls.
 Public Sub SetSuppressCompletionMsgBox(v As Boolean)
     SuppressCompletionMsgBox = v
 End Sub
@@ -32,7 +32,7 @@ Public Sub RunInstall()
     Dim wsControls As Worksheet: Set wsControls = ThisWorkbook.Sheets("Controls")
     Dim wsTriage   As Worksheet: Set wsTriage   = ThisWorkbook.Sheets("Triage")
 
-    ' Every button lives on Controls, never on a data sheet — a button
+    ' Every button lives on Controls, never on a data sheet - a button
     ' sitting on top of Triage's own columns is exactly what disappeared
     ' under real loaded data (found 2026-08-21). See modControls.bas.
     SetupControlsSheet wsControls
@@ -54,7 +54,7 @@ Public Sub RunInstall()
 
     Application.ScreenUpdating = True
     If Not SuppressCompletionMsgBox Then
-        MsgBox "Workbook ready — start on the Controls tab." & vbCrLf & vbCrLf & _
+        MsgBox "Workbook ready - start on the Controls tab." & vbCrLf & vbCrLf & _
                "Click 'Refresh All' to load everything, or refresh one section at " & _
                "a time." & vbCrLf & _
                "Fill in Triage Actions on the Triage tab, then come back to " & _
@@ -66,7 +66,7 @@ End Sub
 
 
 Private Sub SetupControlsSheet(ws As Worksheet)
-    ws.Cells(1, 1).Value = "CoS Triage Workbook — Controls"
+    ws.Cells(1, 1).Value = "CoS Triage Workbook - Controls"
     ws.Cells(1, 1).Font.Bold = True
     ws.Cells(1, 1).Font.Size = 14
     ws.Cells(2, 1).Value = "Every button lives here. Refresh All pulls Triage + " & _

@@ -32,6 +32,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env", override=True)
 
 from cos import ledger
+from cos.textclean import clean_text, normalize_action
 import openpyxl
 
 # ── Lazy Front client (created on first archive call) ────────────────────────
@@ -206,9 +207,14 @@ def _run_triage_sheet(wb: openpyxl.Workbook) -> dict:
     results = []
 
     for row in ws.iter_rows(min_row=2, values_only=True):
-        loop_id = str(row[idx_id] or "").strip()
-        action  = str(row[idx_action] or "").strip().lower()
-        notes   = str(row[idx_notes] or "").strip() if idx_notes is not None else ""
+        # Everything read from the sheet is cleaned first (cos/textclean.py):
+        # a stray quote, smart quote, NBSP, emoji or arrow in the Action cell
+        # must never turn a valid action into "unknown". _id keeps only the
+        # characters a loop id can contain.
+        loop_id = re.sub(r"[^A-Za-z0-9_:.\-]", "", clean_text(row[idx_id]))
+        raw_action = row[idx_action]
+        action  = normalize_action(raw_action)
+        notes   = clean_text(row[idx_notes]) if idx_notes is not None else ""
         num     = row[idx_num] if idx_num is not None else "?"
 
         if not loop_id:
@@ -305,7 +311,7 @@ def _run_triage_sheet(wb: openpyxl.Workbook) -> dict:
                 snoozed += 1
 
             else:
-                print(f"  #{num} unknown action '{action}' — skipped")
+                print(f"  #{num} unknown action {raw_action!r} (read as '{action}') - skipped")
                 skipped += 1
 
         except Exception as exc:
@@ -346,30 +352,32 @@ def _import_sender_rules(wb: openpyxl.Workbook) -> dict:
 
     upserted = deleted = 0
     for row in ws.iter_rows(min_row=2, values_only=True):
-        email = str(row[idx_email] or "").strip().lower()
+        # Same cleaning as the Triage sheet (cos/textclean.py). An address keeps
+        # only what an address can contain (so '"a@b.com"' or '<a@b.com>' work).
+        email = re.sub(r"[^a-z0-9@._+\-*]", "", clean_text(row[idx_email]).lower())
         if not email:
             continue
-        delete_flag = str(row[idx_del] or "").strip().lower() == "yes" if idx_del is not None else False
+        delete_flag = normalize_action(row[idx_del]) == "yes" if idx_del is not None else False
         if delete_flag:
             if ledger.delete_sender_rule(email):
                 print(f"  sender-rule deleted: {email}")
                 deleted += 1
             continue
-        action = str(row[idx_action] or "").strip().lower()
+        action = normalize_action(row[idx_action])
         if not action:
             continue
         imp_raw = row[idx_imp] if idx_imp is not None else None
         try:
-            imp = int(float(str(imp_raw))) if imp_raw else 0
+            imp = int(float(clean_text(imp_raw))) if imp_raw else 0
         except (ValueError, TypeError):
             imp = 0
         ledger.upsert_sender_rule(
             email=email, action=action,
-            category=str(row[idx_cat] or "").strip() if idx_cat is not None else "",
-            direction=str(row[idx_dir] or "").strip() if idx_dir is not None else "",
+            category=clean_text(row[idx_cat]) if idx_cat is not None else "",
+            direction=clean_text(row[idx_dir]) if idx_dir is not None else "",
             importance=imp,
-            subject_pattern=str(row[idx_subj] or "").strip() if idx_subj is not None else "",
-            notes=str(row[idx_notes] or "").strip() if idx_notes is not None else "",
+            subject_pattern=clean_text(row[idx_subj]) if idx_subj is not None else "",
+            notes=clean_text(row[idx_notes]) if idx_notes is not None else "",
         )
         print(f"  sender-rule upserted: {email} -> {action}")
         upserted += 1
@@ -399,20 +407,20 @@ def _import_guidance(wb: openpyxl.Workbook) -> dict:
 
     upserted = deleted = 0
     for row in ws.iter_rows(min_row=2, values_only=True):
-        key = str(row[idx_key] or "").strip().lower()
+        key = clean_text(row[idx_key]).lower()
         if not key:
             continue
-        delete_flag = str(row[idx_del] or "").strip().lower() == "yes" if idx_del is not None else False
+        delete_flag = normalize_action(row[idx_del]) == "yes" if idx_del is not None else False
         if delete_flag:
             if ledger.delete_guidance(key):
                 print(f"  guidance deleted: {key}")
                 deleted += 1
             continue
-        body = str(row[idx_body] or "").strip()
+        body = clean_text(row[idx_body])
         if not body:
             continue
-        scope  = str(row[idx_scope] or "all").strip() if idx_scope is not None else "all"
-        active_raw = str(row[idx_active] or "yes").strip().lower() if idx_active is not None else "yes"
+        scope  = clean_text(row[idx_scope]) or "all" if idx_scope is not None else "all"
+        active_raw = (normalize_action(row[idx_active]) or "yes") if idx_active is not None else "yes"
         active = active_raw not in ("no", "false", "0")
         ledger.upsert_guidance(key=key, body=body, scope=scope or "all", active=active)
         print(f"  guidance upserted: {key} (active={active})")

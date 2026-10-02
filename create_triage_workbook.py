@@ -197,6 +197,36 @@ def _set_config(wb, key: str, value: str) -> None:
             break
 
 
+def _clean_static_text(wb) -> int:
+    """Make every static string in the workbook plain text (cos/textclean.py):
+    no smart punctuation, em dashes, emoji or mojibake. Runs after all sheets
+    are written and before the final save. Skips the hidden Config sheet (it
+    holds the API key). Leading spaces are kept -- the Instructions sheet
+    indents with them. Returns the number of cells changed."""
+    from cos.textclean import clean_text
+    changed = 0
+    for ws in wb.Sheets:
+        if ws.Name == "Config":
+            continue
+        used = ws.UsedRange
+        vals = used.Value
+        if vals is None:
+            continue
+        if not isinstance(vals, tuple):
+            vals = ((vals,),)
+        r0, c0 = used.Row, used.Column
+        for ri, row in enumerate(vals):
+            for ci, v in enumerate(row):
+                if not isinstance(v, str) or not v:
+                    continue
+                lead = len(v) - len(v.lstrip(" "))
+                new = " " * lead + clean_text(v)
+                if new != v:
+                    ws.Cells(r0 + ri, c0 + ci).Value = new
+                    changed += 1
+    return changed
+
+
 def build_workbook(mailbox: str = "", *, api_key: str = "") -> pathlib.Path:
     """Build one workbook, scoped to `mailbox` (a cos/mailboxes.py key) or
     unscoped (every mailbox mixed) if blank. Returns the final output path."""
@@ -276,6 +306,9 @@ def build_workbook(mailbox: str = "", *, api_key: str = "") -> pathlib.Path:
         _write_instructions_sheet(wb, mailbox_label)
         _write_action_guide_sheet(wb)
         print("  Instructions + Action Guide sheets written.")
+
+        n_clean = _clean_static_text(wb)
+        print(f"  Plain-text pass: {n_clean} cell(s) cleaned.")
 
         wb.Save()
         wb.Close(SaveChanges=True)

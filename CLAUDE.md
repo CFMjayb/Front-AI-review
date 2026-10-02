@@ -9,6 +9,34 @@ Ops pipeline. Brought local from Claude Code on the web (cloud) on 2026-06-02.
 
 ---
 
+## 2026-10-02 (later): dropdown showed `"done`, mojibake in the workbook, upload hardened
+
+**Dropdown bug (root cause):** VBA list validation takes the BARE comma list; `modTriage.bas` wrapped it as `"""" & actionList & """"`, so Excel offered `"done` first and `snooze 1m"` last, and the importer read `"done` as an unknown action and skipped it. `modSenderRules.bas` (`"exclude,...`) and `modGuidance.bas` (`"yes,no"`) had the same mistake. Fixed all three; modTriage also strips quote/CR/LF from the server's list defensively. The server's `/api/cos/triage/actions` was never wrong.
+**Mojibake:** the `.bas` files contained em dashes (U+2014); VBComponents.Import reads them as ANSI, so message boxes, the Controls title and the "Deferred - Review Later" banner showed `a-circumflex euro quote`. All `.bas` are now pure ASCII (originals kept as `VBA/*_pre_ascii_dropdown_fix.bas.bak`).
+**One cleaner for everything — `cos/textclean.py`:** `clean_text()` (repairs UTF-8-read-as-cp1252, folds dashes/quotes/ellipsis/bullets/arrows to ASCII, drops emoji, symbols, zero-width and control characters, collapses whitespace; accented letters kept) and `normalize_action()` (bare lowercase token; `"done`, `Done.`, smart quotes, arrows, NBSP all become `done`). Used in three places so they cannot disagree: (1) **upload** — `cos_triage_import.py` cleans the Triage, Sender Rules and Guidance sheets (unknown-action message now shows the raw value); `mcp_server.py` sender-rules-save / guidance-save do the same; (2) **download** — `_tsv_safe` in `mcp_server.py` runs every cell the workbook shows through `clean_text`; (3) **build** — `create_triage_workbook.py::_clean_static_text` cleans the Instructions / Action Guide / Controls text (hidden Config sheet skipped).
+**Tests:** `tests/test_textclean.py` (cleaner, importer reading `"done`, every dropdown option is a fixed point of `normalize_action`, VBA is pure ASCII, no quote-wrapped `Formula1`). Suite: 150 pass; the 2 `test_sender.py` failures are the known pre-existing `attachments` ones.
+**Standing rule:** never put non-ASCII in a `.bas`; never quote-wrap a VBA list `Formula1`. Both are now test-enforced.
+
+## 2026-10-02: triage workbooks returned 403 for everyone (stale baked-in API key) — rebuilt
+
+**Symptom:** Deirdre (DME Finance) got "403 unauthorized" on Refresh Triage; Jay's workbooks were broken the same way.
+**Cause:** each `.xlsm` has the `mcp-api-key` baked into its VeryHidden Config sheet at build time (`create_triage_workbook.py`). 26-147 rotated `mcp-api-key` on 2026-09-30 (and restarted `front-ai-review` to pick it up), so every workbook built before that sends a dead key. Verified, not inferred: old key (fp `259741c8`) → 403, current key (fp `b39e7c62`) → 200 against `/api/cos/loops`.
+**Fix:** backed up the three mailbox workbooks as `*_prior_stale_key_2026-08-22.xlsm`, then rebuilt them with `create_triage_workbook.py` (env `GCP_PROJECT=cfm-front-mail LEDGER_BACKEND=firestore FIRESTORE_PROJECT=cfm-qbo-mcp`; builds CFM/EDOM/DME Finance, not the legacy unscoped one). Re-probed: all three 200. The legacy `CoS Triage Workbook.xlsm` (built 6/15, unscoped) still holds the dead key — unused, left alone.
+**Also stale — the copy the morning email attaches:** `cos/briefing.py::_build_triage_attachment` attaches the workbooks from GCS `gs://cfm-cos-triage-uploads/templates/` (static, not rebuilt per send), so the emailed copies carried the dead key too. Re-uploaded the three rebuilt files 2026-10-02 (old ones kept under `templates/_prior_stale_key_2026-08-22/`); bucket copies verified against the live key.
+**Second casualty of the 9/30 rotations — briefing email delivery:** the `edom-briefing` job reads `email-mcp-api-key` **from project `cfm-front-mail`** (version 1, dead — 401), but 26-147 rotated the email server's key in **`cfm-qbo-mcp`** (version 2, live — accepted). The two projects hold separate copies. The job swallows the error (`Briefing delivery failed (401)` → "saved to file only", execution still reports success), so **no 6 AM briefing email was delivered on 10/1 or 10/2** (last good send 9/30 06:05 ET). Fix = add the live value as a new version of `cfm-front-mail`'s `email-mcp-api-key` (job resolves `:latest` per run, no redeploy; only `edom-briefing` mounts that copy). **RESOLVED 2026-10-02:** Claude's attempts were blocked by the auto-mode classifier (Secret-Store Writes); a Python/ADC attempt by Jay also failed (that identity can read but not add versions). Jay ran `gcloud secrets versions access latest --secret=email-mcp-api-key --project=cfm-qbo-mcp | gcloud secrets versions add email-mcp-api-key --project=cfm-front-mail --data-file=-` under his own gcloud login — version 2 now matches the live key (fp `805fee4c`, server accepts it). Re-ran `edom-briefing`: log shows `delivery=http`, 3 attachments, to jay@cfmins.org. The 10/1 and 10/2 6 AM briefings were never delivered.
+**Standing rule:** **any rotation of `mcp-api-key` means rebuilding these workbooks and getting the new files to every user** (Deirdre, Jay) — a grep for the secret name never finds a key baked inside a binary. Note `Run CoS Triage Workbook.bat` only builds/opens the legacy workbook's lock-check; run the Python builder directly (or fix the bat) to rebuild the per-mailbox ones.
+
+## 2026-09-23: sender rules gain `keep_in_front` (daily emails were being archived)
+
+**Symptom:** Jay got no nightly emails on 9/23. They were actually sent (6:01 and 6:04 AM ET, accepted by Graph). The `edom-pipeline` job then archived both in Front at 6:31 AM: the `notifications@cfmins.org` rule's action is `exclude`, and `exclude` archives the conversation. That rule had never fired before the 9/22 sender-from fix (`fd7cb56`), so this started the morning after.
+
+**Fix:** commit `fd5bf5b`, `pipeline.py` only (backup `pipeline_pre_keep_in_front.py`). New optional sender-rule field `keep_in_front: true` still skips the AI (no loop, $0, tagged `AI/sender-rule-exclude` + processed), but does **not** archive. Rules without the field are unchanged.
+- Set on `notifications@cfmins.org` in Firestore `sender_rules` (cfm-qbo-mcp). `upsert_sender_rule` merges fields, so workbook saves won't wipe it.
+- Verified with a stubbed-Front harness (flag: tagged, not archived; no flag: archived) and by confirming the live job image is on `fd5bf5b`.
+- Reopened 9/23's two archived conversations (`cnv_1i1jf40q`, `cnv_1i1jf3tm`) via the Front API.
+
+**Watch:** the 9/24 6 AM emails should stay in Jay's Front inbox. Consider `keep_in_front` for any future exclude rule covering mail Jay reads himself.
+
 ## Repo / Git
 
 - **GitHub:** `https://github.com/CFMjayb/Front-AI-review.git` (same repo as 26-117/26-118 family)

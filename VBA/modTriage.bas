@@ -3,7 +3,7 @@ Option Explicit
 
 Private Const SHEET_NAME    As String = "Triage"
 
-' Column indices (1-based) — match COLS in cos_triage_export.py
+' Column indices (1-based) - match COLS in cos_triage_export.py
 Private Const COL_NUM       As Long = 1
 Private Const COL_URGENCY   As Long = 2
 Private Const COL_DIR       As Long = 3
@@ -110,7 +110,7 @@ Public Sub RefreshTriage()
 
     Dim lines() As String
     lines = Split(Replace(resp, Chr(13), ""), Chr(10))
-    ' lines(0) = TSV header row from server — skip it
+    ' lines(0) = TSV header row from server - skip it
     ' TSV cols: id(0) num(1) row_type(2) urgency(3) direction(4) dir_label(5)
     '           action_type(6) counterparty(7) summary(8) category(9) age_days(10)
     '           due_at(11) source_date(12) sentiment_display(13) source_link(14)
@@ -144,7 +144,7 @@ Public Sub RefreshTriage()
         fillColor = RowFillColor(fUrgency, fDir, fDirLabel, fRowType)
 
         If fRowType = "divider" Then
-            ws.Cells(rowIdx, 1).Value = "Deferred  —  Review Later"
+            ws.Cells(rowIdx, 1).Value = "Deferred  -  Review Later"
             With ws.Range(ws.Cells(rowIdx, 1), ws.Cells(rowIdx, TOTAL_COLS))
                 .Interior.Color = fillColor
                 .Font.Bold      = True
@@ -223,10 +223,10 @@ Public Sub RefreshTriage()
 NextLine:
     Next i
 
-    ' Data validation dropdown on Triage Action column — fetched live from the
+    ' Data validation dropdown on Triage Action column - fetched live from the
     ' server (single source of truth: cos_triage_export._triage_action_list)
     ' instead of a hardcoded copy. A hardcoded copy here is exactly how this
-    ' dropdown went two months without delegate actions before 2026-08-21 —
+    ' dropdown went two months without delegate actions before 2026-08-21 -
     ' see feedback_untracked_parallel_implementation. Falls back to a safe
     ' baseline list only if the fetch itself fails, so a transient network
     ' hiccup doesn't leave the dropdown empty.
@@ -237,13 +237,23 @@ NextLine:
                      "snooze 1d,snooze 3d,snooze 1w,snooze 2w,snooze 1m"
     End If
 
+    ' Excel's list validation takes the BARE comma-separated text. Wrapping it
+    ' in quotes (as this code did until 2026-10-02) makes Excel offer a literal
+    ' quote on the first and last options -- '"done' and 'snooze 1m"' -- and the
+    ' importer then skipped '"done' as an unknown action. Strip any quote or
+    ' line-break characters defensively so a bad server reply can't recreate it.
+    actionList = Replace(actionList, """", "")
+    actionList = Replace(actionList, vbCr, "")
+    actionList = Replace(actionList, vbLf, "")
+    actionList = Trim(actionList)
+
     Dim lastDataRow As Long: lastDataRow = rowIdx - 1
     If lastDataRow >= 2 Then
         On Error Resume Next
         With ws.Range(ws.Cells(2, COL_ACTION), ws.Cells(lastDataRow, COL_ACTION)).Validation
             .Delete
             .Add Type:=xlValidateList, AlertStyle:=xlValidAlertInformation, _
-                 Formula1:="""" & actionList & """"
+                 Formula1:=actionList
             .InCellDropdown = True
             .IgnoreBlank    = True
             .ShowError      = False
@@ -266,7 +276,7 @@ End Sub
 
 ' Replaces the old row-by-row SaveTriage (which POSTed one JSON call per row
 ' to a live endpoint that had quietly drifted out of sync with the real
-' import logic — see feedback_untracked_parallel_implementation, 2026-08-21).
+' import logic - see feedback_untracked_parallel_implementation, 2026-08-21).
 ' This saves a copy of the whole workbook and uploads it whole; the server
 ' runs the same process_triage_workbook() the CLI import path uses, so there
 ' is exactly one implementation of what each action does, not two.
@@ -307,7 +317,7 @@ Public Sub UploadForProcessing()
     Application.ScreenUpdating = False
     Application.StatusBar = "Saving a copy to upload..."
 
-    ' SaveCopyAs, not Save/SaveAs — captures whatever is currently on screen
+    ' SaveCopyAs, not Save/SaveAs - captures whatever is currently on screen
     ' (including unsaved edits) into a standalone file without touching
     ' ThisWorkbook's own path or triggering a format dialog. The VBA-native
     ' equivalent of the SaveAs-via-temp discipline in feedback_excel_com_vba_save.md.
@@ -333,7 +343,7 @@ Public Sub UploadForProcessing()
     resp = HttpPostBytes("/api/cos/triage/upload", fileBytes, _
         "application/vnd.ms-excel.sheet.macroEnabled.12")
 
-    ' The temp file was only ever a transport copy — clean it up regardless
+    ' The temp file was only ever a transport copy - clean it up regardless
     ' of outcome. If processing failed after the server stored it, its own
     ' copy stays in the bucket for diagnosis; this local one has no further use.
     On Error Resume Next
@@ -344,7 +354,7 @@ Public Sub UploadForProcessing()
     Application.StatusBar = False
 
     If resp = "" Then
-        MsgBox "Upload failed — see the error above. Nothing was changed; " & _
+        MsgBox "Upload failed - see the error above. Nothing was changed; " & _
                "your Triage Actions are still filled in here, safe to retry.", _
                vbExclamation, "Upload Failed"
         Exit Sub
@@ -359,12 +369,12 @@ Public Sub UploadForProcessing()
     Dim msg As String
     msg = "Done: " & doneN & "   Dropped: " & dropN & "   Snoozed: " & snoozeN
     If errN > 0 Then
-        msg = msg & vbCrLf & errN & " row(s) had errors — the file was kept " & _
+        msg = msg & vbCrLf & errN & " row(s) had errors - the file was kept " & _
               "on the server for diagnosis instead of being deleted."
     End If
     MsgBox msg, vbInformation, "Upload Complete"
 
-    ' The server is now the source of truth for what's left — always refresh
+    ' The server is now the source of truth for what's left - always refresh
     ' rather than trying to reconcile row-by-row locally.
     Call RefreshTriage
     Exit Sub

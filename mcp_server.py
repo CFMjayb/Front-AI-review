@@ -208,9 +208,12 @@ def _date_str(s):
 
 
 def _tsv_safe(v):
-    if v is None:
-        return ""
-    return str(v).replace("\t", " ").replace("\n", " ").replace("\r", "")
+    """One TSV cell. Every string the workbook shows passes through here, so it
+    is also where text is made plain (cos/textclean.py: no mojibake, smart
+    punctuation folded to ASCII, emoji/symbols/invisible characters stripped).
+    clean_text also turns tabs/newlines into spaces, as this function always did."""
+    from cos.textclean import clean_text
+    return clean_text(v)
 
 
 _URGENCY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
@@ -417,29 +420,31 @@ async def cos_save_sender_rules(request: Request):
     try:
         ldr = _cos_ledger()
         upserted = deleted = 0
+        from cos.textclean import clean_text, normalize_action
+        import re as _re
         for rule in rules:
-            email = str(rule.get("email") or "").strip().lower()
+            email = _re.sub(r"[^a-z0-9@._+\-*]", "", clean_text(rule.get("email")).lower())
             if not email:
                 continue
-            if str(rule.get("_delete") or "").strip().lower() == "yes":
+            if normalize_action(rule.get("_delete")) == "yes":
                 if ldr.delete_sender_rule(email):
                     deleted += 1
                 continue
-            action = str(rule.get("action") or "").strip().lower()
+            action = normalize_action(rule.get("action"))
             if not action:
                 continue
             imp_raw = rule.get("importance")
             try:
-                imp = int(float(str(imp_raw))) if imp_raw else 0
+                imp = int(float(clean_text(imp_raw))) if imp_raw else 0
             except (ValueError, TypeError):
                 imp = 0
             ldr.upsert_sender_rule(
                 email=email, action=action,
-                category=str(rule.get("category") or ""),
-                direction=str(rule.get("direction") or ""),
+                category=clean_text(rule.get("category")),
+                direction=clean_text(rule.get("direction")),
                 importance=imp,
-                subject_pattern=str(rule.get("subject_pattern") or ""),
-                notes=str(rule.get("notes") or ""),
+                subject_pattern=clean_text(rule.get("subject_pattern")),
+                notes=clean_text(rule.get("notes")),
             )
             upserted += 1
         return JSONResponse({"status": "ok", "upserted": upserted, "deleted": deleted})
@@ -479,19 +484,20 @@ async def cos_save_guidance(request: Request):
     try:
         ldr = _cos_ledger()
         upserted = deleted = 0
+        from cos.textclean import clean_text, normalize_action
         for g in items:
-            key = str(g.get("key") or "").strip().lower()
+            key = clean_text(g.get("key")).lower()
             if not key:
                 continue
-            if str(g.get("_delete") or "").strip().lower() == "yes":
+            if normalize_action(g.get("_delete")) == "yes":
                 if ldr.delete_guidance(key):
                     deleted += 1
                 continue
-            body = str(g.get("body") or "").strip()
+            body = clean_text(g.get("body"))
             if not body:
                 continue
-            scope = str(g.get("scope") or "all").strip()
-            active_raw = str(g.get("active") or "yes").strip().lower()
+            scope = clean_text(g.get("scope")) or "all"
+            active_raw = normalize_action(g.get("active")) or "yes"
             active = active_raw not in ("no", "false", "0")
             ldr.upsert_guidance(key=key, body=body, scope=scope or "all", active=active)
             upserted += 1

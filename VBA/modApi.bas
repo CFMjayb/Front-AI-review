@@ -56,7 +56,7 @@ ErrHandler:
 End Function
 
 
-' Binary upload — used by UploadForProcessing to send the saved workbook's
+' Binary upload - used by UploadForProcessing to send the saved workbook's
 ' raw bytes. WinHttpRequest.Send accepts a Byte array directly for a binary
 ' body; returns a Variant-typed result dict via JSON string, same as HttpPost.
 Public Function HttpPostBytes(path As String, data() As Byte, contentType As String) As String
@@ -71,7 +71,7 @@ Public Function HttpPostBytes(path As String, data() As Byte, contentType As Str
     req.Open "POST", baseUrl & path, False
     req.SetRequestHeader "X-API-Key", apiKey
     req.SetRequestHeader "Content-Type", contentType
-    ' Uploads can take longer than a JSON round-trip — the server both stores
+    ' Uploads can take longer than a JSON round-trip - the server both stores
     ' to GCS and processes every sheet before responding.
     req.SetTimeouts 10000, 30000, 120000, 120000
     On Error GoTo ErrHandler

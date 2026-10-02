@@ -5,7 +5,7 @@ Option Explicit
 ' Keys: ServerUrl, API_KEY, LastRefresh, Mailbox
 ' Mailbox: which cos/mailboxes.py key this workbook is scoped to (e.g. "cfm",
 ' "edom", "dme"), baked in by create_triage_workbook.py at build time. Blank
-' means unscoped — shows every mailbox mixed, matching pre-2026-08-21 behavior.
+' means unscoped - shows every mailbox mixed, matching pre-2026-08-21 behavior.
 
 Private Const CONFIG_SHEET As String = "Config"
 Private Const DEFAULT_URL   As String = "https://front-ai-review-2k7f2bz3dq-ue.a.run.app"

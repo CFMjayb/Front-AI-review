@@ -1,7 +1,7 @@
 Attribute VB_Name = "modControls"
 Option Explicit
 
-' All workbook buttons live here, on the Controls sheet — never on a data
+' All workbook buttons live here, on the Controls sheet - never on a data
 ' sheet itself. A button sitting on top of the Triage sheet's own data
 ' columns is exactly what caused it to disappear under real loaded data
 ' (found 2026-08-21). Matches the Controls-tab convention already
@@ -12,7 +12,7 @@ Public Sub BtnRefreshAll_Click()
     modSenderRules.RefreshSenderRules
     modGuidance.RefreshGuidance
     ThisWorkbook.Sheets("Triage").Activate
-    MsgBox "Refresh All complete — Triage, Sender Rules, and Guidance are " & _
+    MsgBox "Refresh All complete - Triage, Sender Rules, and Guidance are " & _
            "all up to date.", vbInformation, "Refresh All"
 End Sub
 
@@ -45,12 +45,12 @@ Public Sub BtnSendBriefing_Click()
 End Sub
 
 ' Called from ThisWorkbook's Workbook_Open event (inserted at build time by
-' create_triage_workbook.py — VBA's ThisWorkbook is a special object module,
+' create_triage_workbook.py - VBA's ThisWorkbook is a special object module,
 ' code is inserted into it directly, not imported as a .bas file). Lets a
 ' single static, unchanging .xlsm be emailed every day and still show that
-' day's real data the moment it's opened — no server-side regeneration
+' day's real data the moment it's opened - no server-side regeneration
 ' needed, since Refresh already pulls live from the API on every call.
-' Deliberately silent (no completion MsgBox) — the whole point is that
+' Deliberately silent (no completion MsgBox) - the whole point is that
 ' opening the file just works, with nothing to click through first.
 Public Sub AutoRefreshOnOpen()
     On Error Resume Next

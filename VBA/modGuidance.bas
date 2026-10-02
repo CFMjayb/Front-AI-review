@@ -96,7 +96,7 @@ NextLine:
         On Error Resume Next
         With ws.Range(ws.Cells(2, COL_ACTIVE), ws.Cells(rowIdx - 1, COL_ACTIVE)).Validation
             .Delete
-            .Add Type:=xlValidateList, Formula1:="""yes,no"""
+            .Add Type:=xlValidateList, Formula1:="yes,no"
             .InCellDropdown = True
             .IgnoreBlank = True
         End With
@@ -161,6 +161,6 @@ NextRow:
             Call RefreshGuidance
         End If
     Else
-        Application.StatusBar = "Save failed — check error message."
+        Application.StatusBar = "Save failed - check error message."
     End If
 End Sub

@@ -102,7 +102,7 @@ NextLine:
         On Error Resume Next
         With ws.Range(ws.Cells(2, COL_ACTION), ws.Cells(rowIdx - 1, COL_ACTION)).Validation
             .Delete
-            .Add Type:=xlValidateList, Formula1:="""exclude,fyi,force-category,subscribe"""
+            .Add Type:=xlValidateList, Formula1:="exclude,fyi,force-category,subscribe"
             .InCellDropdown = True
             .IgnoreBlank    = True
             .ShowError      = False
@@ -172,6 +172,6 @@ NextRow:
             Call RefreshSenderRules
         End If
     Else
-        Application.StatusBar = "Save failed — check error message."
+        Application.StatusBar = "Save failed - check error message."
     End If
 End Sub
