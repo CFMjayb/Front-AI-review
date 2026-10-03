@@ -23,3 +23,7 @@ data/triage/
 # the binary; the VBA *source* (VBA/*.bas) and the build script are what's
 # tracked instead.
 CoS Triage Workbook*.xlsm
+
+# bulk archive run reports (email subjects / loop data; local only)
+data/backlog/
+data/before_cutoff/

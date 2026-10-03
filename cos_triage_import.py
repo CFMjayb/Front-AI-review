@@ -204,7 +204,19 @@ def _run_triage_sheet(wb: openpyxl.Workbook) -> dict:
         raise ValueError("Required columns '_id' or 'Action' not found. Was the file modified?")
 
     done = dropped = snoozed = skipped = errored = 0
+    unknown = archive_failed = 0
     results = []
+
+    def archive_and_stamp(loop_id: str, loop_rec: Optional[dict], num) -> None:
+        """Archive the Front conversation and stamp the loop. On failure the loop
+        keeps front_archived=False (resolve_loop set it), so cos/archive_sweep.py
+        retries it on the next pipeline run — count it so it is visible."""
+        nonlocal archive_failed
+        if _archive_in_front(loop_rec, num):
+            ledger.patch_loop(loop_id, front_archived=True)
+        elif loop_rec and loop_rec.get("channel") == "front":
+            archive_failed += 1
+            print(f"  #{num} WARNING: not archived in Front yet - the next pipeline sweep will retry")
 
     for row in ws.iter_rows(min_row=2, values_only=True):
         # Everything read from the sheet is cleaned first (cos/textclean.py):
@@ -238,16 +250,14 @@ def _run_triage_sheet(wb: openpyxl.Workbook) -> dict:
             if action == "done":
                 loop_rec = ledger.get_loop(loop_id)
                 ledger.resolve_loop(loop_id, "done")
-                if _archive_in_front(loop_rec, num):
-                    ledger.patch_loop(loop_id, front_archived=True)
+                archive_and_stamp(loop_id, loop_rec, num)
                 print(f"  #{num} done")
                 done += 1
 
             elif action == "drop":
                 loop_rec = ledger.get_loop(loop_id)
                 ledger.resolve_loop(loop_id, "dropped")
-                if _archive_in_front(loop_rec, num):
-                    ledger.patch_loop(loop_id, front_archived=True)
+                archive_and_stamp(loop_id, loop_rec, num)
                 print(f"  #{num} dropped")
                 dropped += 1
 
@@ -255,8 +265,7 @@ def _run_triage_sheet(wb: openpyxl.Workbook) -> dict:
                 loop_rec = ledger.get_loop(loop_id)
                 ledger.patch_loop(loop_id, category="junk")
                 ledger.resolve_loop(loop_id, "dropped", reason="excluded:junk")
-                if _archive_in_front(loop_rec, num):
-                    ledger.patch_loop(loop_id, front_archived=True)
+                archive_and_stamp(loop_id, loop_rec, num)
                 print(f"  #{num} excluded (junk)")
                 dropped += 1
 
@@ -268,8 +277,7 @@ def _run_triage_sheet(wb: openpyxl.Workbook) -> dict:
                     ledger.resolve_loop(loop_id, "done", reason=f"delegated:{to_email}")
                     # Jay's own copy is spoken for now — archive it like any other
                     # resolved loop, same as done/drop/exclude below.
-                    if _archive_in_front(loop_rec, num):
-                        ledger.patch_loop(loop_id, front_archived=True)
+                    archive_and_stamp(loop_id, loop_rec, num)
                     print(f"  #{num} delegated to {to_name} <{to_email}>")
                     done += 1
                 else:
@@ -311,18 +319,24 @@ def _run_triage_sheet(wb: openpyxl.Workbook) -> dict:
                 snoozed += 1
 
             else:
-                print(f"  #{num} unknown action {raw_action!r} (read as '{action}') - skipped")
-                skipped += 1
+                # An action nobody can act on must be VISIBLE: counting it as an
+                # error makes the workbook's "Upload Complete" box warn (the
+                # '"done' bug sat silent for three weeks as a plain "skipped").
+                print(f"  #{num} ERROR: unknown action {raw_action!r} (read as '{action}') - NOT applied")
+                unknown += 1
+                errored += 1
 
         except Exception as exc:
             print(f"  #{num} ERROR: {exc}")
             errored += 1
 
     print(f"\nTriage: Done: {done}  Dropped: {dropped}  Snoozed: {snoozed}  "
-          f"Skipped: {skipped}  Errors: {errored}")
+          f"Skipped: {skipped}  Errors: {errored}  (unknown actions: {unknown}, "
+          f"archive pending retry: {archive_failed})")
     return {
         "done": done, "dropped": dropped, "snoozed": snoozed,
         "skipped": skipped, "errored": errored,
+        "unknown": unknown, "archive_failed": archive_failed,
         "total_actioned": done + dropped + snoozed,
     }
 

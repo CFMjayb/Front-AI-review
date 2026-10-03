@@ -538,6 +538,14 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
     except Exception as exc:
         logger.warning(f"FYI auto-expire failed: {exc}")
 
+    # Self-healing: archive in Front any closed loop whose email is still open
+    # there (reply-closed, FYI-expired, cos_resolve_loop, rate-limited misses).
+    try:
+        from cos import archive_sweep
+        archive_sweep.run(front, dry_run=dry_run)
+    except Exception as exc:
+        logger.warning(f"Archive sweep failed: {exc}")
+
     prefiltered = sum(1 for r in results if r.get("prefiltered"))
     analyzed = sum(1 for r in results if not r["errored"] and not r.get("prefiltered"))
     logger.info(f"Pipeline complete: analyzed={analyzed} prefiltered(spam, no AI)={prefiltered} "

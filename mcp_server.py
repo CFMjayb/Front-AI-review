@@ -375,6 +375,13 @@ async def cos_triage_upload(request: Request):
         return JSONResponse(
             {"error": str(exc), "kept_in_bucket": blob_name}, status_code=500)
 
+    if result.get("errored"):
+        # The workbook tells the user "the file was kept on the server for
+        # diagnosis" whenever rows errored — make that true.
+        logger.warning("Triage upload had %s errored row(s); kept at %s",
+                       result.get("errored"), blob_name)
+        return JSONResponse({"status": "ok", "kept_in_bucket": blob_name, **result})
+
     try:
         blob.delete()
     except Exception as exc:

@@ -270,7 +270,18 @@ def resolve_loop(loop_id_: str, status: str, *, reason: str = "") -> Optional[di
     if not snap.exists:
         return None
     loop = _loop_doc(snap)
-    ref.update({"status": status, "last_reviewed": now_iso()})
+    updates = {"status": status, "last_reviewed": now_iso()}
+    if status in ("done", "dropped") and loop.get("channel") == "front":
+        # Every path that closes a Front loop (triage upload, reply-detected
+        # reconcile, FYI auto-expiry, the cos_resolve_loop tool) funnels through
+        # here, so this is the one place that can guarantee the email gets
+        # archived: front_archived=False marks it pending for cos/archive_sweep.py,
+        # and resolved_at is the moment the sweep's newer-reply guard compares
+        # against (last_reviewed is bumped by every patch, so it cannot serve).
+        # Callers that archive straight away stamp True right after.
+        updates["front_archived"] = False
+        updates["resolved_at"] = updates["last_reviewed"]
+    ref.update(updates)
     if status in ("done", "dropped"):
         _record_feedback(loop, status, reason=reason)
     return _loop_doc(ref.get())
