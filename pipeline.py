@@ -546,7 +546,16 @@ def run_pipeline(*, conversation_id: Optional[str] = None, dry_run: Optional[boo
     except Exception as exc:
         logger.warning(f"Archive sweep failed: {exc}")
 
-    prefiltered = sum(1 for r in results if r.get("prefiltered"))
+    # Daily emails (notifications@cfmins.org "Your day" / "CFM Daily Processing"):
+    # archive the earlier ones when a newer one has arrived. Driven by the sender
+    # rule's supersede_series field (Jay, 2026-10-05).
+    try:
+        from cos import daily_rollover
+        daily_rollover.run(front, dry_run=dry_run)
+    except Exception as exc:
+        logger.warning(f"Daily rollover failed: {exc}")
+
+    prefiltered =sum(1 for r in results if r.get("prefiltered"))
     analyzed = sum(1 for r in results if not r["errored"] and not r.get("prefiltered"))
     logger.info(f"Pipeline complete: analyzed={analyzed} prefiltered(spam, no AI)={prefiltered} "
                 f"errored={sum(1 for r in results if r['errored'])} skipped={len(skipped)} "
