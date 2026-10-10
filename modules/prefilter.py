@@ -106,6 +106,19 @@ def is_positive_pay(conv: dict, messages: list[dict]) -> tuple[bool, bool]:
     return True, has_exceptions
 
 
+# Beacon's DEV environment redirects every email to a test address (Jay's) and starts the subject with
+# "[DEV — would have gone to: <the real address>]" (Website/email_client._apply_test_mode). Those are Jay's own test messages,
+# e.g. a sign-in code he asked for. Anchored at the start of the subject and requiring the whole phrase, so no ordinary email
+# is ever matched. Any dash character is accepted between DEV and "would".
+_BEACON_DEV_TEST_SUBJECT = re.compile(r"^\s*\[DEV\b[^\]\n]{0,12}would have gone to:", re.I)
+
+
+def is_beacon_dev_test_email(conv: dict) -> bool:
+    """True for a Beacon DEV test email (see above). The pipeline leaves these exactly as they arrived: open in Front, no AI
+    review, no sender-rule archive, no loop (Jay, 2026-10-10: the dev sign-in codes were being archived out of his Front inbox)."""
+    return bool(_BEACON_DEV_TEST_SUBJECT.match(conv.get("subject") or ""))
+
+
 def is_calendar_response(conv: dict) -> bool:
     """True for a calendar meeting-response notification (Accepted/Declined/Tentative).
     These are auto-generated and need no AI review or loop."""

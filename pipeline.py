@@ -199,6 +199,20 @@ def _process_one(conv: dict, front: FrontClient, claude: ClaudeClient, dry_run: 
             "modules": {"skip_reason": f"not_open:{conv_status}"},
         }
 
+    # Beacon DEV test emails (subject starts "[DEV — would have gone to: ...]") are Jay's own test mail: leave them exactly as they
+    # arrived. They stay open in Front: no AI review, no sender-rule or spam archive, no loop. They get the processed tag only so the
+    # next run does not pick them up again (an untagged one would be fetched every run and crowd out real mail).
+    if prefilter.is_beacon_dev_test_email(conv):
+        if not dry_run:
+            front.add_tag(cid, PROCESSED_TAG)
+        logger.info(f"[dev-test-email] {cid} - Beacon DEV test email, left open in Front")
+        return {
+            "conversation_id": cid, "subject": conv.get("subject"),
+            "duration_s": time.time() - started, "cost_usd": 0.0,
+            "errored": False, "prefiltered": True,
+            "modules": {"dev_test_email": "left_open"},
+        }
+
     try:
         messages = front.get_conversation_messages(cid)
         transcript = front.messages_to_transcript(messages)
