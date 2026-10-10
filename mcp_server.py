@@ -14,11 +14,12 @@ load_dotenv(override=True)
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from auth import get_front_api_token
+import mcp_auth
+import oauth_discovery
+from auth import _get_secret, _secret_cache, get_front_api_token
 from front_client import FrontClient
 
 logging.basicConfig(
@@ -30,28 +31,16 @@ logger = logging.getLogger(__name__)
 # Injected by Cloud Run --set-secrets or set in .env for dev
 _MCP_API_KEY = os.environ.get("MCP_API_KEY", "")
 
+# 26-147 rollout #5 (2026-10-10): the connector path (/mcp) signs in with Microsoft (Entra ID); the key stays
+# on /api/cos/... for the triage workbooks. The rules live in mcp_auth.py. MCP_ALLOW_API_KEY=false (phase B)
+# stops /mcp accepting the key; it defaults to true so nothing breaks until sign-in has been proven.
+CLOUD_RUN_URL = os.environ.get(
+    "CLOUD_RUN_URL", "https://front-ai-review-2k7f2bz3dq-ue.a.run.app").rstrip("/")
+_ALLOW_API_KEY_ON_MCP = os.environ.get("MCP_ALLOW_API_KEY", "true").strip().lower() != "false"
+
 _OPEN_PATHS = {"/", "/health"}
-
-
-class ApiKeyMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        if request.url.path in _OPEN_PATHS or request.method == "OPTIONS":
-            return await call_next(request)
-
-        api_key = (
-            request.headers.get("X-API-Key", "")
-            or request.query_params.get("api_key", "")
-        )
-        if not api_key:
-            return JSONResponse({"error": "Missing X-API-Key header"}, status_code=401)
-        if not _MCP_API_KEY:
-            logger.error("MCP_API_KEY not configured")
-            return JSONResponse({"error": "Server misconfigured"}, status_code=500)
-        if api_key != _MCP_API_KEY:
-            logger.warning("Rejected invalid API key from %s",
-                           request.client.host if request.client else "unknown")
-            return JSONResponse({"error": "Unauthorized"}, status_code=403)
-        return await call_next(request)
+if oauth_discovery.MODE:   # sign-in discovery pages are open (a connector reads them before it has a token)
+    _OPEN_PATHS |= {"/.well-known/oauth-protected-resource"} | oauth_discovery.OPEN_PATHS
 
 
 mcp = FastMCP(
@@ -530,11 +519,29 @@ async def cos_send_briefing(request: Request):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+# ── Sign-in discovery (26-147) ────────────────────────────────────────────────
+
+@mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
+async def oauth_protected_resource(request: Request):
+    """RFC 9728 metadata telling MCP clients where to sign in (404 when sign-in is off)."""
+    if not oauth_discovery.MODE:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    return JSONResponse(oauth_discovery.prm_payload(_get_secret, CLOUD_RUN_URL),
+                        headers={"Access-Control-Allow-Origin": "*"})
+
+
+oauth_discovery.register(mcp, _get_secret, CLOUD_RUN_URL, logger)
+
+
 # ── App factory ───────────────────────────────────────────────────────────────
 
 def create_app():
     starlette_app = mcp.streamable_http_app()
-    starlette_app.add_middleware(ApiKeyMiddleware)
+    starlette_app.add_middleware(
+        mcp_auth.AuthMiddleware,
+        get_secret=_get_secret, secret_cache=_secret_cache, api_key=_MCP_API_KEY,
+        cloud_run_url=CLOUD_RUN_URL, allow_api_key_on_mcp=_ALLOW_API_KEY_ON_MCP,
+        open_paths=_OPEN_PATHS)
     return starlette_app
 
 
