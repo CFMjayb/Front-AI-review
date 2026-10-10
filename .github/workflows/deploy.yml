@@ -57,7 +57,7 @@ jobs:
             --platform         managed \
             --allow-unauthenticated \
             --set-env-vars     GCP_PROJECT=${{ secrets.GCP_PROJECT_ID }},USE_SECRET_MANAGER=true,FIRESTORE_PROJECT=cfm-qbo-mcp,LEDGER_BACKEND=firestore,COS_TRIAGE_BUCKET=cfm-cos-triage-uploads \
-            --set-env-vars     "CLOUD_RUN_URL=https://front-ai-review-2k7f2bz3dq-ue.a.run.app,OAUTH_MODE=proxy,OAUTH_SECRET_PREFIX=front-mail,OAUTH_RESOURCE=https://front-ai-review-2k7f2bz3dq-ue.a.run.app/mcp,OAUTH_SCOPES=f7a8fc4e-33e6-4558-9d12-be9f3c7cf7fa/.default offline_access,MCP_ALLOW_API_KEY=true" \
+            --set-env-vars     "CLOUD_RUN_URL=https://front-ai-review-2k7f2bz3dq-ue.a.run.app,OAUTH_MODE=proxy,OAUTH_SECRET_PREFIX=front-mail,OAUTH_RESOURCE=https://front-ai-review-2k7f2bz3dq-ue.a.run.app/mcp,OAUTH_SCOPES=f7a8fc4e-33e6-4558-9d12-be9f3c7cf7fa/.default offline_access,MCP_ALLOW_API_KEY=false" \
             --set-secrets     MCP_API_KEY=mcp-api-key:latest,FRONT_API_TOKEN=front-api-token:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest,INBOX_IDS=inbox-ids:latest,TEAMMATE_IDS=teammate-ids:latest \
             --service-account  ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }} \
             --memory           512Mi \
