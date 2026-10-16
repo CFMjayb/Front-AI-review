@@ -126,7 +126,11 @@ def _delegate(loop: dict, num, note: str, to_email: str, to_name: str) -> bool:
 
     cp = loop.get("counterparty") or "unknown"
     cp_email = loop.get("counterparty_email") or ""
-    subject = f"[Delegated] #{num} - {cp}: {(loop.get('summary') or '')[:70]}"
+    # No square brackets in a subject: Bracket (secure e-mail) treats them as a trigger and drops mail
+    # from a shared sender (found 2026-10-16). The counterparty and summary are written by the AI or the
+    # sender, so any brackets in them are swapped for parentheses too.
+    subject = (f"Delegated #{num} - {cp}: {(loop.get('summary') or '')[:70]}"
+               .replace("[", "(").replace("]", ")"))
     body = [
         f"Jay has delegated this open item to {to_name} to complete.",
         "",
