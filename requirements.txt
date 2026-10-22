@@ -13,3 +13,6 @@ cryptography>=41.0.0
 tzdata>=2024.1
 pytest>=7.0.0
 openpyxl>=3.1.0
+# Security floor, added 2026-10-22 (26-134 container_vuln): certifi is transitive (requests),
+# GHSA-6q48-6c7w-9gw2 is fixed in 2026.10.19.
+certifi>=2026.10.19
